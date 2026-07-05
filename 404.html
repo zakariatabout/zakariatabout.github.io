@@ -1,31 +1,456 @@
 <!doctype html><html lang="fr"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Tennis AI Coach — Session partagée</title>
 <meta name="apple-itunes-app" content="app-id=6777688982">
+<meta name="theme-color" content="#0B1035">
+<meta name="robots" content="noindex">
+<meta property="og:title" content="Ma session Tennis AI Coach">
+<meta property="og:description" content="Regarde mon analyse de coup, note sur 100, par Tennis AI Coach.">
 <style>
-:root{--teal:#0F766E}
+/* ── Tennis AI Coach — « Night Session » tokens (repris de l'app) ────────── */
+:root{
+  --night-top:#0B1035; --night-bot:#1E2E9E;
+  --surface:#141A3D; --surface-2:#1B2350; --line:rgba(255,255,255,.10);
+  --ink:#EDEFFA; --ink-2:#9AA3D0; --ink-3:#6E77A8;
+  --volt:#D4EB4A; --cyan:#3EE6FF; --cta:#3341CC;
+  --good:#00B899; --mid:#F2A93B; --poor:#FF6B78;
+  --r-card:22px; --r-chip:11px; --r-btn:15px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#F5F7F8;color:#0b1f1d;
- min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-.card{background:#fff;border-radius:24px;box-shadow:0 12px 40px rgba(0,0,0,.10);max-width:380px;width:100%;
- padding:34px 26px;text-align:center}
-.logo{width:78px;height:78px;border-radius:18px;background:linear-gradient(135deg,#1B69C9,#0F766E);margin:0 auto 18px;
- display:flex;align-items:center;justify-content:center;font-size:38px}
-h1{font-size:21px;margin-bottom:8px}
-p{color:#5b6b69;font-size:15px;line-height:1.5;margin-bottom:22px}
-.btn{display:block;background:var(--teal);color:#fff;text-decoration:none;font-weight:700;font-size:16px;
- padding:15px;border-radius:14px;margin-bottom:12px}
-.small{font-size:12px;color:#9aa7a5;margin-top:14px}
+html{-webkit-text-size-adjust:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,sans-serif;
+  color:var(--ink);
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(62,230,255,.16), transparent 60%),
+    linear-gradient(168deg, var(--night-top) 0%, #131C63 55%, var(--night-bot) 100%);
+  background-attachment:fixed;
+  min-height:100vh; min-height:100dvh;
+  display:flex; align-items:center; justify-content:center;
+  padding:24px 18px calc(24px + env(safe-area-inset-bottom));
+  line-height:1.5; -webkit-font-smoothing:antialiased;
+}
+.wrap{width:100%;max-width:398px}
+
+/* ── Brand row ──────────────────────────────────────────────────────────── */
+.brand{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:20px}
+.brand .mark{
+  width:34px;height:34px;border-radius:10px;flex:0 0 auto;
+  background:radial-gradient(circle at 32% 30%, var(--volt), #A6C020);
+  box-shadow:0 0 0 3px rgba(212,235,74,.14), 0 6px 18px rgba(212,235,74,.25);
+  position:relative;
+}
+.brand .mark::after{content:"";position:absolute;inset:0;border-radius:10px;
+  background:linear-gradient(120deg,transparent 46%,rgba(255,255,255,.55) 50%,transparent 54%)}
+.brand .name{font-size:14px;font-weight:600;letter-spacing:.02em;color:var(--ink)}
+.brand .name b{color:var(--volt);font-weight:700}
+
+/* ── Card ───────────────────────────────────────────────────────────────── */
+.card{
+  background:linear-gradient(180deg, var(--surface) 0%, #10173A 100%);
+  border:1px solid var(--line);
+  border-radius:var(--r-card);
+  box-shadow:0 24px 60px rgba(3,6,28,.55), inset 0 1px 0 rgba(255,255,255,.05);
+  padding:26px 22px 22px;
+}
+.eyebrow{
+  font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--cyan);text-align:center;margin-bottom:16px;
+}
+.eyebrow.warn{color:var(--mid)}
+
+/* ── Score ring ─────────────────────────────────────────────────────────── */
+.ringwrap{display:flex;justify-content:center;margin:2px 0 6px;position:relative}
+.ring{width:172px;height:172px;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-linecap:round}
+.ring .track{stroke:rgba(255,255,255,.09);stroke-width:13}
+.ring .prog{stroke-width:13;transition:stroke-dashoffset 1s cubic-bezier(.22,1,.36,1)}
+.ringlabel{
+  position:absolute;top:0;left:0;width:100%;height:172px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+}
+.score{font-size:52px;font-weight:800;letter-spacing:-.02em;line-height:1;
+  font-variant-numeric:tabular-nums}
+.score small{font-size:19px;font-weight:600;color:var(--ink-3);margin-left:1px}
+.score-cap{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-2);margin-top:7px}
+
+/* ── Meta chips ─────────────────────────────────────────────────────────── */
+.chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:16px 0 4px}
+.chip{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--surface-2);border:1px solid var(--line);
+  border-radius:var(--r-chip);padding:7px 12px;font-size:13px;font-weight:600;color:var(--ink)}
+.chip .dot{width:8px;height:8px;border-radius:50%;background:var(--volt)}
+.chip.stroke .dot{background:var(--cyan)}
+
+/* ── Remarks ────────────────────────────────────────────────────────────── */
+.remarks{margin-top:18px;display:flex;flex-direction:column;gap:9px}
+.remarks h2{font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-2);margin-bottom:2px}
+.rmk{
+  display:flex;gap:11px;align-items:flex-start;
+  background:rgba(255,255,255,.035);border:1px solid var(--line);
+  border-left:3px solid var(--ink-3);
+  border-radius:12px;padding:11px 13px;font-size:14px;color:var(--ink)}
+.rmk.good{border-left-color:var(--good)}
+.rmk.warning{border-left-color:var(--mid)}
+.rmk.info{border-left-color:var(--cyan)}
+.rmk .ic{flex:0 0 auto;width:18px;height:18px;margin-top:1px}
+.rmk .tx{flex:1}
+.rmk .tx .tgt{display:block;margin-top:3px;font-size:12px;color:var(--ink-2)}
+
+/* ── Comparison ─────────────────────────────────────────────────────────── */
+.cmp{display:flex;align-items:stretch;gap:12px;margin:6px 0 2px}
+.cmp .col{flex:1;text-align:center;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:16px;padding:16px 10px}
+.cmp .col .lbl{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2);margin-bottom:8px}
+.cmp .col .val{font-size:38px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+.cmp .arrow{align-self:center;flex:0 0 auto;font-size:13px;font-weight:800;
+  color:var(--night-top);background:var(--volt);border-radius:999px;padding:5px 9px;white-space:nowrap}
+.cmp .arrow.down{background:var(--poor);color:#fff}
+
+/* ── Video ──────────────────────────────────────────────────────────────── */
+.videoBox{margin-top:16px;border-radius:16px;overflow:hidden;border:1px solid var(--line);background:#000}
+.videoBox video{display:block;width:100%;max-height:60vh;background:#000}
+
+/* ── CTAs ───────────────────────────────────────────────────────────────── */
+.cta{display:flex;flex-direction:column;gap:10px;margin-top:22px}
+.btn{
+  display:flex;align-items:center;justify-content:center;gap:9px;
+  text-decoration:none;font-weight:700;font-size:16px;
+  padding:15px 16px;border-radius:var(--r-btn);border:1px solid transparent;
+  transition:transform .12s ease, filter .12s ease;
+}
+.btn:active{transform:scale(.985)}
+.btn:focus-visible{outline:3px solid var(--cyan);outline-offset:3px}
+.btn-primary{background:var(--volt);color:#141A00;
+  box-shadow:0 10px 26px rgba(212,235,74,.30)}
+.btn-primary:hover{filter:brightness(1.04)}
+.btn-ghost{background:transparent;color:var(--ink);border-color:rgba(255,255,255,.18)}
+.btn-ghost:hover{background:rgba(255,255,255,.05)}
+.btn .apple{width:19px;height:19px}
+.subnote{text-align:center;font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+.subnote a{color:var(--ink-2)}
+
+/* ── Loading / error states ─────────────────────────────────────────────── */
+.center{text-align:center;padding:14px 4px}
+.spinner{width:38px;height:38px;margin:8px auto 16px;border-radius:50%;
+  border:3px solid rgba(255,255,255,.14);border-top-color:var(--volt);
+  animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.state-emoji{font-size:40px;margin-bottom:12px}
+.state h1{font-size:20px;font-weight:700;margin-bottom:8px;text-wrap:balance}
+.state p{font-size:14px;color:var(--ink-2);margin-bottom:4px}
+.hidden{display:none!important}
+@media (prefers-reduced-motion:reduce){
+  .spinner{animation:none}
+  .ring .prog{transition:none}
+  .btn{transition:none}
+}
 </style></head><body>
-<div class="card">
-  <div class="logo">🎾</div>
-  <h1>Un ami t'a envoyé une session</h1>
-  <p>Installe <b>Tennis AI Coach</b> puis rouvre le lien : ta session s'ouvrira dans l'app.</p>
-  <a class="btn" href="https://apps.apple.com/app/id6777688982">Télécharger sur l'App Store</a>
-  <div class="small" id="sid"></div>
+<div class="wrap">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="name">Tennis <b>AI Coach</b></span>
+  </div>
+
+  <div class="card">
+    <!-- LOADING -->
+    <div id="loading" class="center">
+      <div class="spinner" role="status" aria-label="Chargement"></div>
+      <p class="subnote" id="loadingText">Chargement de la session…</p>
+    </div>
+
+    <!-- SESSION / COMPARISON (filled by JS) -->
+    <div id="content" class="hidden"></div>
+
+    <!-- ERROR (expired / not found) -->
+    <div id="error" class="hidden state center">
+      <div class="state-emoji">🎾</div>
+      <h1 id="errTitle">Session expirée</h1>
+      <p id="errText">Ce lien n'est plus disponible. Analyse ton propre coup avec Tennis AI Coach.</p>
+      <div class="cta">
+        <a class="btn btn-primary" id="errCta" href="https://apps.apple.com/fr/app/id6777688982">
+          <svg class="apple" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.36 12.9c.02 2.6 2.28 3.46 2.3 3.47-.02.06-.36 1.24-1.19 2.46-.72 1.05-1.46 2.1-2.64 2.12-1.15.02-1.53-.68-2.85-.68-1.31 0-1.73.66-2.82.7-1.13.05-2-1.13-2.72-2.18-1.48-2.15-2.61-6.07-1.09-8.72.75-1.31 2.1-2.15 3.56-2.17 1.11-.02 2.17.75 2.85.75.69 0 1.97-.93 3.32-.79.57.02 2.16.23 3.18 1.73-.08.05-1.9 1.11-1.88 3.31zM14.2 5.36c.6-.73 1.01-1.75.9-2.76-.87.04-1.92.58-2.55 1.31-.56.64-1.06 1.68-.92 2.67.97.08 1.96-.5 2.57-1.22z"/></svg>
+          Télécharger sur l'App Store
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <p class="subnote">Analyse de coup par IA · note sur 100 · coach vocal</p>
 </div>
+
 <script>
-  var m = location.pathname.match(/\/s\/([^\/?#]+)/);
-  if (m) document.getElementById('sid').textContent = 'Session ' + m[1];
+(function(){
+  "use strict";
+
+  // ── i18n : FR par défaut, EN si la langue du navigateur n'est pas française ──
+  var isFR = ((navigator.language || navigator.userLanguage || "fr").toLowerCase().indexOf("fr") === 0);
+  var T = isFR ? {
+    loading:"Chargement de la session…",
+    scoreCap:"Note sur 100",
+    strokeLabel:{forehand:"Coup droit", backhand:"Revers", serve:"Service"},
+    camLabel:{side:"De côté", back:"Derrière"},
+    remarksTitle:"Ce que dit le coach",
+    before:"Avant", after:"Après",
+    openApp:"Voir dans l'app",
+    download:"Télécharger Tennis AI Coach",
+    expTitle:"Session expirée",
+    expText:"Ce lien n'est plus disponible. Analyse ton propre coup avec Tennis AI Coach.",
+    genTitle:"Page introuvable",
+    genText:"Cette page n'existe pas. Découvre Tennis AI Coach, ton coach de tennis par IA.",
+    appStore:"https://apps.apple.com/fr/app/id6777688982",
+    tagline:"Analyse de coup par IA · note sur 100 · coach vocal",
+    ogShared:"Un ami t'a partagé sa session",
+    cmpShared:"Sa progression, séance à séance"
+  } : {
+    loading:"Loading session…",
+    scoreCap:"Score out of 100",
+    strokeLabel:{forehand:"Forehand", backhand:"Backhand", serve:"Serve"},
+    camLabel:{side:"Side view", back:"Behind"},
+    remarksTitle:"What the coach says",
+    before:"Before", after:"After",
+    openApp:"Open in the app",
+    download:"Get Tennis AI Coach",
+    expTitle:"Session expired",
+    expText:"This link is no longer available. Analyze your own stroke with Tennis AI Coach.",
+    genTitle:"Page not found",
+    genText:"This page doesn't exist. Discover Tennis AI Coach, your AI tennis coach.",
+    appStore:"https://apps.apple.com/app/id6777688982",
+    tagline:"AI stroke analysis · score out of 100 · voice coach",
+    ogShared:"A friend shared their session",
+    cmpShared:"Their progress, session by session"
+  };
+
+  // Apply static translated strings
+  document.documentElement.lang = isFR ? "fr" : "en";
+  var lt = document.getElementById("loadingText"); if (lt) lt.textContent = T.loading;
+  document.querySelector(".subnote:last-of-type").textContent = T.tagline;
+  document.getElementById("errCta").href = T.appStore;
+
+  var SUPABASE = "https://xkhsvwqzuzmrvdrghshv.supabase.co";
+  var BUCKET = "sessions";
+
+  var elLoading = document.getElementById("loading");
+  var elContent = document.getElementById("content");
+  var elError   = document.getElementById("error");
+
+  function esc(s){ return String(s == null ? "" : s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;"); }
+
+  // Swift default JSONEncoder encodes Date as seconds since 2001-01-01 UTC.
+  function swiftDateToJS(v){
+    if (typeof v !== "number" || !isFinite(v)) return null;
+    return new Date((v + 978307200) * 1000);
+  }
+  function fmtDate(d){
+    if (!d) return "";
+    try { return d.toLocaleDateString(isFR ? "fr-FR" : "en-US",
+      { year:"numeric", month:"long", day:"numeric" }); }
+    catch(e){ return d.toISOString().slice(0,10); }
+  }
+
+  function scoreColor(s){
+    if (s >= 70) return "var(--good)";
+    if (s >= 50) return "var(--mid)";
+    return "var(--poor)";
+  }
+  function round(n){ return Math.round(Number(n) || 0); }
+
+  // Small inline SVG icons per severity
+  var ICONS = {
+    good:  '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="var(--good)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+    warning:'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="var(--mid)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
+    info:  '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>'
+  };
+
+  var APPLE_SVG = '<svg class="apple" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.36 12.9c.02 2.6 2.28 3.46 2.3 3.47-.02.06-.36 1.24-1.19 2.46-.72 1.05-1.46 2.1-2.64 2.12-1.15.02-1.53-.68-2.85-.68-1.31 0-1.73.66-2.82.7-1.13.05-2-1.13-2.72-2.18-1.48-2.15-2.61-6.07-1.09-8.72.75-1.31 2.1-2.15 3.56-2.17 1.11-.02 2.17.75 2.85.75.69 0 1.97-.93 3.32-.79.57.02 2.16.23 3.18 1.73-.08.05-1.9 1.11-1.88 3.31zM14.2 5.36c.6-.73 1.01-1.75.9-2.76-.87.04-1.92.58-2.55 1.31-.56.64-1.06 1.68-.92 2.67.97.08 1.96-.5 2.57-1.22z"/></svg>';
+
+  // Build the score ring SVG markup for a given score & size.
+  function ringSVG(score, size){
+    size = size || 172;
+    var stroke = 13, r = (size - stroke) / 2, c = 2 * Math.PI * r;
+    var s = Math.max(0, Math.min(100, round(score)));
+    var off = c * (1 - s / 100);
+    return '<div class="ringwrap">' +
+      '<svg class="ring" width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'" role="img" aria-label="'+s+' / 100">' +
+        '<circle class="track" cx="'+size/2+'" cy="'+size/2+'" r="'+r+'"></circle>' +
+        '<circle class="prog" cx="'+size/2+'" cy="'+size/2+'" r="'+r+'" ' +
+          'stroke="'+scoreColor(s)+'" stroke-dasharray="'+c.toFixed(1)+'" ' +
+          'stroke-dashoffset="'+c.toFixed(1)+'" data-off="'+off.toFixed(1)+'"></circle>' +
+      '</svg>' +
+      '<div class="ringlabel"><div class="score">'+s+'<small>/100</small></div>' +
+      '<div class="score-cap">'+esc(T.scoreCap)+'</div></div>' +
+    '</div>';
+  }
+
+  // Animate ring after insert (respects reduced motion via CSS). Wrapped in
+  // try/catch so a rendering hiccup never bubbles up and masks a valid session
+  // as "expired" — the ring simply stays at its final value without the sweep.
+  function animateRings(){
+    try {
+      var progs = elContent.querySelectorAll(".ring .prog");
+      void elContent.offsetWidth; // force reflow so the transition plays
+      for (var i = 0; i < progs.length; i++){
+        progs[i].style.strokeDashoffset = progs[i].getAttribute("data-off");
+      }
+    } catch(e){ /* non-fatal: ring shows without animation */ }
+  }
+
+  function strokeName(cfg){
+    var k = cfg && cfg.stroke;
+    return (T.strokeLabel[k]) || (k ? (k.charAt(0).toUpperCase()+k.slice(1)) : "");
+  }
+  function camName(cfg){
+    var k = cfg && cfg.camera;
+    return (T.camLabel[k]) || "";
+  }
+
+  // Collect up to `max` most useful remarks across shots: prioritize the
+  // top shot's remarks, dedupe by text, cap the count.
+  function pickRemarks(session, max){
+    max = max || 3;
+    var out = [], seen = {};
+    var shots = (session.shots || []).slice();
+    // measured shots first, highest score first (highlight the best of the session)
+    shots.sort(function(a,b){
+      var am = (a.measured !== false), bm = (b.measured !== false);
+      if (am !== bm) return am ? -1 : 1;
+      return (b.score||0) - (a.score||0);
+    });
+    for (var i = 0; i < shots.length && out.length < max; i++){
+      var rs = shots[i].remarks || [];
+      for (var j = 0; j < rs.length && out.length < max; j++){
+        var r = rs[j];
+        var key = (r.text||"").trim().toLowerCase();
+        if (!key || seen[key]) continue;
+        seen[key] = 1; out.push(r);
+      }
+    }
+    return out;
+  }
+
+  function remarkRow(r){
+    var sev = (r.severity === "good" || r.severity === "warning" || r.severity === "info")
+              ? r.severity : "info";
+    var tgt = r.target ? '<span class="tgt">'+esc(r.target)+'</span>' : '';
+    return '<div class="rmk '+sev+'">'+ICONS[sev]+
+      '<span class="tx">'+esc(r.text)+tgt+'</span></div>';
+  }
+
+  function ctaBlock(id){
+    var openApp = id ? ('<a class="btn btn-ghost" href="https://zakariatabout.github.io/s/'+encodeURIComponent(id)+'">'+esc(T.openApp)+'</a>') : '';
+    return '<div class="cta">'+
+      '<a class="btn btn-primary" href="'+T.appStore+'">'+APPLE_SVG+esc(T.download)+'</a>'+
+      openApp+
+    '</div>';
+  }
+
+  function videoBlock(b64){
+    if (!b64 || typeof b64 !== "string" || b64.length < 100) return "";
+    // Optional preview. Guess mp4/quicktime; browsers sniff anyway.
+    var src = "data:video/mp4;base64," + b64;
+    return '<div class="videoBox"><video controls playsinline preload="metadata" '+
+      'poster="" src="'+src+'"></video></div>';
+  }
+
+  function renderSingle(session, id, videoB64){
+    var cfg = session.config || {};
+    var d = fmtDate(swiftDateToJS(session.createdAt));
+    var remarks = pickRemarks(session, 3);
+    var html = '<div class="eyebrow">'+esc(T.ogShared)+'</div>' +
+      ringSVG(session.overallScore, 172) +
+      '<div class="chips">' +
+        '<span class="chip stroke"><span class="dot"></span>'+esc(strokeName(cfg))+'</span>' +
+        (d ? '<span class="chip"><span class="dot"></span>'+esc(d)+'</span>' : '') +
+      '</div>';
+    if (remarks.length){
+      html += '<div class="remarks"><h2>'+esc(T.remarksTitle)+'</h2>';
+      for (var i=0;i<remarks.length;i++) html += remarkRow(remarks[i]);
+      html += '</div>';
+    }
+    html += videoBlock(videoB64);
+    html += ctaBlock(id);
+    elContent.innerHTML = html;
+    show(elContent);
+    animateRings();
+  }
+
+  function renderComparison(before, after, id){
+    var db = round(before.overallScore), da = round(after.overallScore);
+    var delta = da - db;
+    var arrowCls = delta >= 0 ? "" : "down";
+    var arrowTxt = (delta >= 0 ? "▲ +" : "▼ ") + Math.abs(delta);
+    var cfg = after.config || before.config || {};
+    var remarks = pickRemarks(after, 2);
+    var html = '<div class="eyebrow">'+esc(T.cmpShared)+'</div>' +
+      '<div class="chips" style="margin-top:2px">' +
+        '<span class="chip stroke"><span class="dot"></span>'+esc(strokeName(cfg))+'</span>' +
+      '</div>' +
+      '<div class="cmp">' +
+        '<div class="col"><div class="lbl">'+esc(T.before)+'</div>' +
+          '<div class="val" style="color:'+scoreColor(db)+'">'+db+'</div></div>' +
+        '<div class="arrow '+arrowCls+'">'+arrowTxt+'</div>' +
+        '<div class="col"><div class="lbl">'+esc(T.after)+'</div>' +
+          '<div class="val" style="color:'+scoreColor(da)+'">'+da+'</div></div>' +
+      '</div>';
+    if (remarks.length){
+      html += '<div class="remarks"><h2>'+esc(T.remarksTitle)+'</h2>';
+      for (var i=0;i<remarks.length;i++) html += remarkRow(remarks[i]);
+      html += '</div>';
+    }
+    html += ctaBlock(id);
+    elContent.innerHTML = html;
+    show(elContent);
+  }
+
+  function show(el){ el.classList.remove("hidden"); }
+  function hide(el){ el.classList.add("hidden"); }
+
+  function showError(kind){
+    hide(elLoading); hide(elContent);
+    var t = document.getElementById("errTitle"), p = document.getElementById("errText");
+    if (kind === "generic"){ t.textContent = T.genTitle; p.textContent = T.genText; }
+    else { t.textContent = T.expTitle; p.textContent = T.expText; }
+    document.getElementById("errCta").innerHTML = APPLE_SVG + esc(T.download);
+    document.getElementById("errCta").href = T.appStore;
+    show(elError);
+  }
+
+  // ── Route ──────────────────────────────────────────────────────────────
+  var m = location.pathname.match(/\/s\/([A-Za-z0-9]{1,40})/);
+  if (!m){
+    showError("generic");
+    return;
+  }
+  var id = m[1];
+
+  // Public Supabase Storage object (same URL the app downloads from). CORS is
+  // open (access-control-allow-origin: *), so this cross-origin fetch works.
+  var url = SUPABASE + "/storage/v1/object/public/" + BUCKET + "/" +
+            encodeURIComponent(id) + ".tnnscoach";
+
+  fetch(url, { method:"GET", cache:"no-store" })
+    .then(function(res){
+      if (!res.ok) throw new Error("http " + res.status);
+      return res.json();
+    })
+    .then(function(payload){
+      if (!payload || !payload.session) throw new Error("bad payload");
+      hide(elLoading);
+      if (payload.session2 && payload.session2.overallScore != null){
+        renderComparison(payload.session, payload.session2, id);
+      } else {
+        renderSingle(payload.session, id, payload.videoBase64);
+      }
+    })
+    .catch(function(){
+      showError("expired");
+    });
+})();
 </script>
 </body></html>
