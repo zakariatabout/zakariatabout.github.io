@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import '../config.dart';
+import 'local_community_store.dart';
 
 /// Un signalement communautaire : un conducteur s'est garé ou a libéré
 /// une place à cet endroit.
@@ -27,11 +28,19 @@ class ParkingEvent {
 /// même stack que Tennis AI Coach. Anonyme : aucun compte requis, seules la
 /// position et l'heure de l'événement sont stockées.
 class CommunityService {
-  CommunityService({http.Client? client}) : _client = client ?? http.Client();
+  CommunityService({http.Client? client, LocalCommunityStore? localStore})
+      : _client = client ?? http.Client(),
+        _local = localStore ?? LocalCommunityStore();
 
   final http.Client _client;
+  final LocalCommunityStore _local;
 
-  bool get isEnabled => AppConfig.communityEnabled;
+  /// La couche communautaire est toujours disponible : backend Supabase
+  /// partagé si configuré, sinon stockage local (mode démo mono-appareil).
+  bool get isEnabled => true;
+
+  /// Vrai si un backend Supabase partagé est branché (sinon : mode local).
+  bool get isRemote => AppConfig.communityEnabled;
 
   Map<String, String> get _headers => {
         'apikey': AppConfig.supabaseAnonKey,
@@ -45,7 +54,7 @@ class CommunityService {
 
   /// Signale une place prise ('parked') ou libérée ('freed').
   Future<bool> report(String type, LatLng position) async {
-    if (!isEnabled) return false;
+    if (!isRemote) return _local.report(type, position);
     final resp = await _client.post(
       _table(),
       headers: {..._headers, 'Prefer': 'return=minimal'},
@@ -65,7 +74,10 @@ class CommunityService {
     double radiusMeters = 600,
     Duration maxAge = const Duration(minutes: 15),
   }) async {
-    if (!isEnabled) return const [];
+    if (!isRemote) {
+      return _local.recentEventsNear(center,
+          radiusMeters: radiusMeters, maxAge: maxAge);
+    }
     final dLat = radiusMeters / 111320.0;
     final dLon = radiusMeters /
         (111320.0 * math.cos(center.latitude * math.pi / 180).abs());
