@@ -52,6 +52,27 @@ rm -rf ../../parking && cp -r build/web ../../parking
 Le dossier `/parking` à la racine du dépôt est le build servi sur
 `https://zakariatabout.github.io/parking/`.
 
+## Couche communautaire temps réel (Supabase)
+
+Même stack backend que Tennis AI Coach. Les conducteurs signalent « je me gare » /
+« je libère ma place » ; les probabilités des rues voisines sont corrigées en direct
+(boost décroissant sur 12 min, rayon 60 m) et les places libérées apparaissent sur la carte.
+
+Mise en service :
+
+1. Créer un projet sur [supabase.com](https://supabase.com) (gratuit) ;
+2. Coller [supabase/schema.sql](supabase/schema.sql) dans le SQL Editor et l'exécuter ;
+3. Compiler avec les clés du projet (Settings → API) :
+
+```bash
+flutter build web --release --base-href /parking/ \
+  --dart-define=SUPABASE_URL=https://<projet>.supabase.co \
+  --dart-define=SUPABASE_ANON_KEY=<clé anon>
+```
+
+Sans ces variables, l'app fonctionne normalement mais sans la couche temps réel
+(les boutons de signalement sont masqués).
+
 ## Android (à venir)
 
 Le projet cible aussi Android (`flutter build apk`). Les permissions de localisation sont
