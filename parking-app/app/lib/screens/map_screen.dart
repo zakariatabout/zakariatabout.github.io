@@ -6,6 +6,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../models/street_segment.dart';
+import '../services/community_adjuster.dart';
+import '../services/community_service.dart';
 import '../services/geocoding_service.dart';
 import '../services/overpass_service.dart';
 import '../services/probability_engine.dart';
@@ -27,6 +29,8 @@ class _MapScreenState extends State<MapScreen> {
   final _routing = RoutingService();
   final _engine = const ProbabilityEngine();
   final _planner = const SearchLoopPlanner();
+  final _community = CommunityService();
+  final _adjuster = const CommunityAdjuster();
 
   static final _parisCenter = const LatLng(48.8566, 2.3522);
 
@@ -43,6 +47,8 @@ class _MapScreenState extends State<MapScreen> {
   bool _loadingZone = false;
   bool _loadingRoute = false;
   String? _error;
+  List<ParkingEvent> _communityEvents = [];
+  bool _reporting = false;
 
   /// Heure d'arrivée simulée (curseur) ; null = maintenant.
   int? _simulatedHour;
@@ -103,6 +109,7 @@ class _MapScreenState extends State<MapScreen> {
       if (!mounted) return;
       setState(() => _rawSegments = segments);
       _recompute();
+      _refreshCommunityEvents();
     } catch (_) {
       if (!mounted) return;
       setState(
@@ -112,18 +119,63 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  /// Recalcule probabilités + boucle (appelé après chargement et quand
-  /// l'heure simulée change).
+  /// Recalcule probabilités + boucle (appelé après chargement, quand l'heure
+  /// simulée change et quand des signalements arrivent).
   void _recompute() {
     final dest = _destination;
     if (dest == null || _rawSegments.isEmpty) return;
-    final scored = _engine.scoreAll(_rawSegments, _arrivalTime);
+    var scored = _engine.scoreAll(_rawSegments, _arrivalTime);
+    // Correction temps réel : uniquement pour une arrivée "maintenant".
+    if (_simulatedHour == null && _communityEvents.isNotEmpty) {
+      scored = _adjuster.adjust(scored, _communityEvents, DateTime.now());
+    }
     final loop = _planner.plan(scored, dest);
     setState(() {
       _scored = scored;
       _loop = loop;
       _route = null;
     });
+  }
+
+  Future<void> _refreshCommunityEvents() async {
+    final dest = _destination;
+    if (dest == null || !_community.isEnabled) return;
+    try {
+      final events = await _community.recentEventsNear(dest);
+      if (!mounted) return;
+      _communityEvents = events;
+      _recompute();
+    } catch (_) {
+      // Couche temps réel optionnelle : on ignore les échecs réseau.
+    }
+  }
+
+  /// Signale « je me gare » (type 'parked') ou « je libère » (type 'freed')
+  /// à la position GPS actuelle.
+  Future<void> _reportEvent(String type) async {
+    setState(() => _reporting = true);
+    try {
+      final pos = await _locateMe(moveCamera: false);
+      if (pos == null) {
+        _showSnack('Position GPS indisponible');
+        return;
+      }
+      final ok = await _community.report(type, pos);
+      _showSnack(ok
+          ? (type == 'freed'
+              ? 'Merci ! Place signalée aux autres conducteurs'
+              : 'Bien garé ! Rue mise à jour')
+          : 'Signalement impossible (réessayez)');
+      if (ok) await _refreshCommunityEvents();
+    } finally {
+      if (mounted) setState(() => _reporting = false);
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ── Guidage ────────────────────────────────────────────────────────────
@@ -251,6 +303,29 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               MarkerLayer(
                 markers: [
+                  // Places libérées récemment par la communauté.
+                  for (final e in _communityEvents.where((e) => e.isFreed))
+                    Marker(
+                      point: e.position,
+                      width: 24,
+                      height: 24,
+                      child: Container(
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF00897B),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                        child: const Text(
+                          'P',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
                   if (_destination != null)
                     Marker(
                       point: _destination!,
@@ -525,6 +600,30 @@ class _MapScreenState extends State<MapScreen> {
                     : 'Recalculer l’itinéraire'),
               ),
             ),
+            if (_community.isEnabled) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed:
+                          _reporting ? null : () => _reportEvent('parked'),
+                      icon: const Icon(Icons.local_parking, size: 18),
+                      label: const Text('Je me gare'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed:
+                          _reporting ? null : () => _reportEvent('freed'),
+                      icon: const Icon(Icons.time_to_leave, size: 18),
+                      label: const Text('Je libère'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
