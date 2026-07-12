@@ -248,10 +248,62 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Rendu ──────────────────────────────────────────────────────────────
 
+  /// Couleur en dégradé continu rouge → orange → vert selon la probabilité.
+  /// Le dégradé (plutôt que 3 paliers) fait ressortir les rues « les moins
+  /// pires » même quand tout le quartier est chargé.
   Color _probColor(double p) {
-    if (p >= 0.6) return const Color(0xFF2E7D32);
-    if (p >= 0.3) return const Color(0xFFF9A825);
-    return const Color(0xFFC62828);
+    // On étale [0 .. 0.65] sur la teinte rouge(0°) → vert(120°).
+    final t = (p / 0.65).clamp(0.0, 1.0);
+    return HSVColor.fromAHSV(1.0, t * 120.0, 0.72, 0.82).toColor();
+  }
+
+  /// Formulation honnête du niveau de chances cumulé (évite le « 100 % »
+  /// trompeur au-dessus d'un quartier plein).
+  ({String label, IconData icon}) _qualitative(double cumulative) {
+    if (cumulative >= 0.85) {
+      return (label: 'Très bonnes chances', icon: Icons.sentiment_very_satisfied);
+    }
+    if (cumulative >= 0.6) {
+      return (label: 'Bonnes chances', icon: Icons.sentiment_satisfied);
+    }
+    if (cumulative >= 0.35) {
+      return (label: 'Chances moyennes', icon: Icons.sentiment_neutral);
+    }
+    return (label: 'Stationnement difficile', icon: Icons.sentiment_dissatisfied);
+  }
+
+  Widget _legend() {
+    Widget item(double p, String txt) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 11,
+              height: 11,
+              decoration:
+                  BoxDecoration(color: _probColor(p), shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 4),
+            Text(txt, style: const TextStyle(fontSize: 11)),
+          ],
+        );
+    return Material(
+      elevation: 3,
+      borderRadius: BorderRadius.circular(12),
+      color: Colors.white,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            item(0.1, 'Peu'),
+            const SizedBox(width: 10),
+            item(0.4, 'Moyen'),
+            const SizedBox(width: 10),
+            item(0.65, 'Bonnes'),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -451,6 +503,14 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
 
+          // Légende des couleurs.
+          if (_scored.isNotEmpty && _suggestions.isEmpty)
+            Positioned(
+              top: 74,
+              left: 12,
+              child: SafeArea(child: _legend()),
+            ),
+
           // Bouton "ma position".
           Positioned(
             right: 12,
@@ -507,9 +567,14 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Widget _buildLoopPanel(SearchLoop loop) {
-    final pct = (loop.cumulativeProbability * 100).round();
     final minutes = _planner.expectedSearchMinutes(loop);
-    final best = loop.orderedSegments.isEmpty ? null : loop.orderedSegments.first;
+    // Chiffre honnête : la probabilité de la MEILLEURE rue (une chance réelle
+    // sur une rue), pas le cumul gonflé qui atteint vite 100 %.
+    final ranked = [...loop.orderedSegments]
+      ..sort((a, b) => b.probabilityFree.compareTo(a.probabilityFree));
+    final best = ranked.isEmpty ? null : ranked.first;
+    final bestPct = best == null ? 0 : (best.probabilityFree * 100).round();
+    final qual = _qualitative(loop.cumulativeProbability);
 
     return Card(
       margin: const EdgeInsets.all(12),
@@ -523,8 +588,9 @@ class _MapScreenState extends State<MapScreen> {
             Row(
               children: [
                 CircleAvatar(
-                  backgroundColor: _probColor(loop.cumulativeProbability),
-                  child: Text('$pct%',
+                  backgroundColor:
+                      best == null ? Colors.grey : _probColor(best.probabilityFree),
+                  child: Text('$bestPct%',
                       style: const TextStyle(
                           color: Colors.white,
                           fontSize: 13,
@@ -535,13 +601,24 @@ class _MapScreenState extends State<MapScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Chances de trouver une place sur la boucle',
-                        style: Theme.of(context).textTheme.bodyMedium,
+                      Row(
+                        children: [
+                          Icon(qual.icon, size: 18, color: Colors.black54),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              '${qual.label} en parcourant '
+                              '${loop.orderedSegments.length} rue'
+                              '${loop.orderedSegments.length > 1 ? 's' : ''}',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          ),
+                        ],
                       ),
                       Text(
-                        'Recherche estimée : ~${minutes.ceil()} min'
-                        '${best == null ? '' : ' · commencez par ${best.segment.name}'}',
+                        best == null
+                            ? 'Recherche estimée : ~${minutes.ceil()} min'
+                            : 'Visez ${best.segment.name} · recherche ~${minutes.ceil()} min',
                         style: Theme.of(context).textTheme.bodySmall,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
