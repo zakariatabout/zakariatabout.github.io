@@ -139,7 +139,7 @@ class _MapScreenState extends State<MapScreen> {
 
   Future<void> _refreshCommunityEvents() async {
     final dest = _destination;
-    if (dest == null || !_community.isEnabled) return;
+    if (dest == null) return;
     try {
       final events = await _community.recentEventsNear(dest);
       if (!mounted) return;
@@ -622,6 +622,29 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ],
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _community.isRemote ? Icons.groups : Icons.phone_android,
+                      size: 13,
+                      color: Colors.black45,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _community.isRemote
+                          ? 'En direct avec la communauté'
+                          : 'Mode démo (signalements sur cet appareil)',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: Colors.black45),
+                    ),
+                  ],
+                ),
               ),
             ],
           ],
