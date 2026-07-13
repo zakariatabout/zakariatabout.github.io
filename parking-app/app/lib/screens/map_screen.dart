@@ -286,8 +286,9 @@ class _MapScreenState extends State<MapScreen> {
   /// Le dégradé (plutôt que 3 paliers) fait ressortir les rues « les moins
   /// pires » même quand tout le quartier est chargé.
   Color _probColor(double p) {
-    // On étale [0 .. 0.65] sur la teinte rouge(0°) → vert(120°).
-    final t = (p / 0.65).clamp(0.0, 1.0);
+    // On étale [0.15 .. 0.85] sur la teinte rouge(0°) → vert(120°) pour que
+    // les différences dans la plage utile ressortent bien.
+    final t = ((p - 0.15) / 0.70).clamp(0.0, 1.0);
     return HSVColor.fromAHSV(1.0, t * 120.0, 0.72, 0.82).toColor();
   }
 
