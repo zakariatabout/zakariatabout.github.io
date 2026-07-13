@@ -175,8 +175,11 @@ class _MapScreenState extends State<MapScreen> {
         ParkingRegime.gratuit => const Color(0xFF43A047),
         ParkingRegime.resident => const Color(0xFF8E24AA),
         ParkingRegime.moto => const Color(0xFF00897B),
+        ParkingRegime.velo => const Color(0xFF9CCC65),
         ParkingRegime.livraison => const Color(0xFFF57C00),
         ParkingRegime.handicap => const Color(0xFF3949AB),
+        ParkingRegime.taxi => const Color(0xFFFDD835),
+        ParkingRegime.autocar => const Color(0xFF6D4C41),
         ParkingRegime.interdit => const Color(0xFFE53935),
         ParkingRegime.autre => const Color(0xFF9E9E9E),
       };

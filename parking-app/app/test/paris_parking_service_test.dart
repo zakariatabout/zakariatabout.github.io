@@ -58,6 +58,28 @@ void main() {
     expect(regimes, contains(ParkingRegime.handicap));
   });
 
+  test('valeurs réelles du dataset Paris (majuscules)', () async {
+    final service = ParisParkingService(
+      client: mockReturning({
+        'results': [
+          lineFeature('2 ROUES'),
+          lineFeature('LIVRAISON'),
+          lineFeature('PAYANT'),
+          lineFeature('TAXI'),
+          lineFeature('AUTOCAR'),
+        ],
+      }),
+    );
+    final regimes =
+        (await service.fetchSpots(paris)).map((s) => s.regime).toList();
+    expect(regimes, contains(ParkingRegime.moto)); // « 2 ROUES »
+    expect(regimes, contains(ParkingRegime.livraison));
+    expect(regimes, contains(ParkingRegime.payant));
+    expect(regimes, contains(ParkingRegime.taxi));
+    expect(regimes, contains(ParkingRegime.autocar));
+    expect(regimes, isNot(contains(ParkingRegime.autre)));
+  });
+
   test('gère MultiLineString', () async {
     final service = ParisParkingService(
       client: mockReturning({

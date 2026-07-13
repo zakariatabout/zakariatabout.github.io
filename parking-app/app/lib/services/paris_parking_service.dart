@@ -11,8 +11,11 @@ enum ParkingRegime {
   gratuit,
   resident,
   moto,
+  velo,
   livraison,
   handicap,
+  taxi,
+  autocar,
   interdit,
   autre,
 }
@@ -160,9 +163,18 @@ class ParisParkingService {
     if (l.contains('livraison') || l.contains('logistique')) {
       return ParkingRegime.livraison;
     }
-    if (l.contains('moto') || l.contains('deux roues') || l.contains('2rm') ||
-        l.contains('deux-roues')) {
+    if (l.contains('taxi')) return ParkingRegime.taxi;
+    if (l.contains('autocar') || l.contains('autobus') || l.contains('bus') ||
+        l.contains('car ')) {
+      return ParkingRegime.autocar;
+    }
+    // Deux-roues motorisés : « 2 ROUES », « DEUX ROUES », « MOTO »…
+    if (l.contains('moto') || l.contains('roues') || l.contains('2rm') ||
+        l.contains('2 roues') || l.contains('deux-roues')) {
       return ParkingRegime.moto;
+    }
+    if (l.contains('vélo') || l.contains('velo') || l.contains('cycle')) {
+      return ParkingRegime.velo;
     }
     if (l.contains('résident') || l.contains('resident')) {
       return ParkingRegime.resident;
@@ -181,9 +193,12 @@ extension ParkingRegimeInfo on ParkingRegime {
         ParkingRegime.payant => 'Payant',
         ParkingRegime.gratuit => 'Gratuit',
         ParkingRegime.resident => 'Résident',
-        ParkingRegime.moto => 'Moto',
+        ParkingRegime.moto => 'Deux-roues',
+        ParkingRegime.velo => 'Vélo',
         ParkingRegime.livraison => 'Livraison',
         ParkingRegime.handicap => 'GIG-GIC',
+        ParkingRegime.taxi => 'Taxi',
+        ParkingRegime.autocar => 'Autocar',
         ParkingRegime.interdit => 'Gêne / interdit',
         ParkingRegime.autre => 'Autre',
       };
