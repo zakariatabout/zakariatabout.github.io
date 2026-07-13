@@ -7,9 +7,18 @@
 /// Sans ces valeurs, l'app fonctionne normalement mais sans la couche
 /// temps réel communautaire (signalements de places).
 class AppConfig {
-  static const String supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-  static const String supabaseAnonKey =
-      String.fromEnvironment('SUPABASE_ANON_KEY');
+  // Valeurs par défaut = projet Supabase de ParkRadar. La clé "publishable"
+  // est publique par conception (protégée par les règles RLS côté serveur),
+  // donc l'inscrire ici est sans risque et permet aux builds d'archive Xcode
+  // (TestFlight) d'inclure la couche communautaire sans --dart-define.
+  static const String supabaseUrl = String.fromEnvironment(
+    'SUPABASE_URL',
+    defaultValue: 'https://xkhsvwqzuzmrvdrghshv.supabase.co',
+  );
+  static const String supabaseAnonKey = String.fromEnvironment(
+    'SUPABASE_ANON_KEY',
+    defaultValue: 'sb_publishable_KmxkQQjvFmvblhBX3WBwHw__of4oMsF',
+  );
 
   static bool get communityEnabled =>
       supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty;
