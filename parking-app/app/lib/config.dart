@@ -14,3 +14,10 @@ class AppConfig {
   static bool get communityEnabled =>
       supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty;
 }
+
+/// En-tête d'identification exigé par Nominatim/Overpass (les User-Agent par
+/// défaut des bibliothèques HTTP sont bloqués). Ignoré côté web (le navigateur
+/// impose le sien), indispensable sur mobile.
+const String kUserAgent =
+    'ParkRadar/1.0 (https://zakariatabout.github.io/parking)';
+

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../config.dart';
+
 /// Régime d'une place de stationnement (règle d'usage).
 enum ParkingRegime {
   payant,
@@ -62,7 +64,8 @@ class ParisParkingService {
       },
     );
     try {
-      final resp = await _client.get(uri);
+      final resp =
+          await _client.get(uri, headers: const {'User-Agent': kUserAgent});
       if (resp.statusCode != 200) return const [];
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       final results = (data['results'] as List?) ?? const [];

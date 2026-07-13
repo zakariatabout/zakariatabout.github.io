@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../config.dart';
+
 class DrivingRoute {
   DrivingRoute({
     required this.points,
@@ -32,7 +34,8 @@ class RoutingService {
       'https://router.project-osrm.org/route/v1/driving/$coords'
       '?overview=full&geometries=geojson&continue_straight=false',
     );
-    final resp = await _client.get(uri);
+    final resp =
+        await _client.get(uri, headers: const {'User-Agent': kUserAgent});
     if (resp.statusCode != 200) return null;
     final data = jsonDecode(resp.body) as Map<String, dynamic>;
     final routes = (data['routes'] as List?) ?? const [];
