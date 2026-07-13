@@ -90097,7 +90097,7 @@ case 2:return A.L(o.at(-1),r)}})
 return A.N($async$ld,r)},
 aa5(a){if(a.length===0)return
 this.d.ard(new A.a4h(a,B.EP))},
-RT(a){var s=B.d.cU(a/0.65,0,1)*120
+RT(a){var s=B.d.cU((a-0.15)/0.7,0,1)*120
 return A.azt(1,s,0.5903999999999999,0.5903999999999999*(1-Math.abs(B.d.bf(s/60,2)-1)),0.22960000000000003)},
 aiF(a){if(a>=0.85)return new A.r4(B.Fr,"Tr\xe8s bonnes chances")
 if(a>=0.6)return new A.r4(B.Fq,"Bonnes chances")
@@ -90130,7 +90130,7 @@ for(o=f.cx,n=o.length,m=t.K,q=0;q<o.length;o.length===n||(0,A.q)(o),++q){l=o[q]
 k=l.a
 j=k.a
 i=c.p(0,j)?7:4
-h=new A.z5(1,B.d.cU(l.d/0.65,0,1)*120,0.72,0.82).BW()
+h=new A.z5(1,B.d.cU((l.d-0.15)/0.7,0,1)*120,0.72,0.82).BW()
 p.push(A.ayn(h.Cc(c.p(0,j)?0.95:0.55),k.d,i,m))}c=t.E
 p=A.c([s,A.ayo(p,m)],c)
 if(f.k1&&J.j1(f.id)){s=A.c([],r)
@@ -90148,7 +90148,7 @@ if(b)for(r=A.aNE(d.a,0,t.ca),o=J.bb(r.a),r=r.b,n=new A.ze(o,r);n.q();){m=n.c
 m=m>=0?new A.a3(r+m,o.gK()):A.U(A.c_())
 l=m.b
 k=l.a.gAZ()
-j=new A.z5(1,B.d.cU(l.d/0.65,0,1)*120,0.72,0.82).BW()
+j=new A.z5(1,B.d.cU((l.d-0.15)/0.7,0,1)*120,0.72,0.82).BW()
 g=new A.aY(B.k,2,B.r,-1)
 s.push(new A.pl(k,A.ki(B.O,A.ei(""+(m.a+1),e,e,e,B.zR,e,e),B.A,e,new A.dS(j,e,new A.db(g,g,g,g),e,e,e,B.cf),e,e,e,e,e,e,e),26,26,e))}p.push(new A.A_(s,e))
 s=A.of(28)
@@ -90616,7 +90616,7 @@ m=n[A.AO(b)]
 if(A.ayp(b)===6)m=o?m+0.05:m+0.02
 else if(A.ayp(b)===7)m=o?m+0.06:m-0.08
 l=B.d.cU(p==="secondary"||p==="tertiary"?m-0.03:m,0.05,0.995)
-k.push(new A.dj(r,q,l,B.d.cU(q===0?0:1-Math.pow(l,q),0,1)))}return k}}
+k.push(new A.dj(r,q,l,B.d.cU(q===0?0:1-Math.pow(l,q/2.5),0,1)))}return k}}
 A.Ku.prototype={}
 A.aeQ.prototype={
 pe(a){return this.awO(a)},

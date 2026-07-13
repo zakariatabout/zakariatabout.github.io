@@ -22,6 +22,13 @@ class ProbabilityEngine {
   /// (entrées charretières, intersections, passages piétons...).
   static const double usableFraction = 0.65;
 
+  /// Facteur de « trouvabilité » : en pratique, une seule place théoriquement
+  /// libre ne suffit pas (on la rate, elle est mal placée, occupée à l'arrivée…).
+  /// On divise la capacité effective par ce facteur : le modèle devient plus
+  /// conservateur et surtout plus sensible à l'heure (évite la saturation à
+  /// ~100 % qui rendait le curseur d'heure sans effet).
+  static const double findabilityFactor = 2.5;
+
   /// Profil d'occupation par heure (0-23) pour une rue résidentielle :
   /// saturée la nuit, se libère en journée.
   static const List<double> _residentialProfile = [
@@ -83,8 +90,11 @@ class ProbabilityEngine {
   ScoredSegment score(StreetSegment s, DateTime when) {
     final capacity = estimateCapacity(s);
     final occupancy = estimateOccupancy(s, when);
-    final pFree =
-        capacity == 0 ? 0.0 : 1.0 - math.pow(occupancy, capacity).toDouble();
+    // P(place trouvable) = 1 - occupation^(capacité effective).
+    final effectiveCapacity = capacity / findabilityFactor;
+    final pFree = capacity == 0
+        ? 0.0
+        : 1.0 - math.pow(occupancy, effectiveCapacity).toDouble();
     return ScoredSegment(
       segment: s,
       capacity: capacity,
