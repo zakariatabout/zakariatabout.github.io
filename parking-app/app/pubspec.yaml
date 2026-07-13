@@ -1,5 +1,5 @@
 name: parking_app
-description: "A new Flutter project."
+description: "ParkRadar — trouvez une place de stationnement dans la rue."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -50,6 +50,23 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.6
+
+# Icône de l'app (générée pour iOS + Android via `dart run flutter_launcher_icons`).
+flutter_launcher_icons:
+  image_path: "assets/icon/parkradar.png"
+  ios: true
+  android: true
+  remove_alpha_ios: true
+  background_color_ios: "#0D47A1"
+
+# Écran de démarrage (via `dart run flutter_native_splash:create`).
+flutter_native_splash:
+  color: "#0D47A1"
+  image: "assets/icon/parkradar_splash.png"
+  android: true
+  ios: true
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
