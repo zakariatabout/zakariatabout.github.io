@@ -10,6 +10,7 @@ import '../services/community_adjuster.dart';
 import '../services/community_service.dart';
 import '../services/geocoding_service.dart';
 import '../services/overpass_service.dart';
+import '../services/paris_parking_service.dart';
 import '../services/probability_engine.dart';
 import '../services/routing_service.dart';
 import '../services/search_loop_planner.dart';
@@ -31,6 +32,7 @@ class _MapScreenState extends State<MapScreen> {
   final _planner = const SearchLoopPlanner();
   final _community = CommunityService();
   final _adjuster = const CommunityAdjuster();
+  final _paris = ParisParkingService();
 
   static final _parisCenter = const LatLng(48.8566, 2.3522);
 
@@ -49,6 +51,8 @@ class _MapScreenState extends State<MapScreen> {
   String? _error;
   List<ParkingEvent> _communityEvents = [];
   bool _reporting = false;
+  List<ParkingSpot> _parisSpots = [];
+  bool _showParisSpots = true;
 
   /// Heure d'arrivée simulée (curseur) ; null = maintenant.
   int? _simulatedHour;
@@ -110,6 +114,7 @@ class _MapScreenState extends State<MapScreen> {
       setState(() => _rawSegments = segments);
       _recompute();
       _refreshCommunityEvents();
+      _refreshParisSpots();
     } catch (_) {
       if (!mounted) return;
       setState(
@@ -149,6 +154,32 @@ class _MapScreenState extends State<MapScreen> {
       // Couche temps réel optionnelle : on ignore les échecs réseau.
     }
   }
+
+  Future<void> _refreshParisSpots() async {
+    final dest = _destination;
+    if (dest == null || !ParisParkingService.isInParis(dest)) {
+      if (_parisSpots.isNotEmpty) setState(() => _parisSpots = []);
+      return;
+    }
+    try {
+      final spots = await _paris.fetchSpots(dest);
+      if (!mounted) return;
+      setState(() => _parisSpots = spots);
+    } catch (_) {
+      // Couche optionnelle : on ignore les échecs.
+    }
+  }
+
+  Color _regimeColor(ParkingRegime r) => switch (r) {
+        ParkingRegime.payant => const Color(0xFF1E88E5),
+        ParkingRegime.gratuit => const Color(0xFF43A047),
+        ParkingRegime.resident => const Color(0xFF8E24AA),
+        ParkingRegime.moto => const Color(0xFF00897B),
+        ParkingRegime.livraison => const Color(0xFFF57C00),
+        ParkingRegime.handicap => const Color(0xFF3949AB),
+        ParkingRegime.interdit => const Color(0xFFE53935),
+        ParkingRegime.autre => const Color(0xFF9E9E9E),
+      };
 
   /// Signale « je me gare » (type 'parked') ou « je libère » (type 'freed')
   /// à la position GPS actuelle.
@@ -342,6 +373,18 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                 ],
               ),
+              // Places réelles de Paris, colorées par régime (open data Ville).
+              if (_showParisSpots && _parisSpots.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    for (final spot in _parisSpots)
+                      Polyline(
+                        points: spot.points,
+                        strokeWidth: 5,
+                        color: _regimeColor(spot.regime),
+                      ),
+                  ],
+                ),
               // Itinéraire de guidage.
               if (_route != null)
                 PolylineLayer(
@@ -523,6 +566,25 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
 
+          // Bouton bascule des places réelles (Paris uniquement).
+          if (_parisSpots.isNotEmpty)
+            Positioned(
+              right: 12,
+              bottom: loop != null ? 285 : 90,
+              child: FloatingActionButton.small(
+                heroTag: 'parisSpots',
+                backgroundColor:
+                    _showParisSpots ? const Color(0xFF1565C0) : Colors.white,
+                onPressed: () =>
+                    setState(() => _showParisSpots = !_showParisSpots),
+                tooltip: 'Afficher/masquer les places réelles',
+                child: Icon(
+                  Icons.local_parking,
+                  color: _showParisSpots ? Colors.white : const Color(0xFF1565C0),
+                ),
+              ),
+            ),
+
           if (_loadingZone)
             const Center(
               child: Card(
@@ -563,6 +625,54 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
+    );
+  }
+
+  /// Résumé des régimes réels (open data Paris) autour de la destination :
+  /// petites puces colorées avec le % de chaque type.
+  Widget _regimeSummary() {
+    final counts = <ParkingRegime, int>{};
+    for (final s in _parisSpots) {
+      counts[s.regime] = (counts[s.regime] ?? 0) + 1;
+    }
+    final total = _parisSpots.length;
+    final entries = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final top = entries.take(4);
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(Icons.map_outlined, size: 18, color: Colors.black54),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 2,
+            children: [
+              for (final e in top)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: _regimeColor(e.key),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${e.key.label} ${(e.value / total * 100).round()}%',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -628,6 +738,10 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ],
             ),
+            if (_parisSpots.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _regimeSummary(),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
