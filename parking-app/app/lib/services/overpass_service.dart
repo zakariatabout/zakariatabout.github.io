@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../config.dart';
 import '../models/street_segment.dart';
 
 /// Récupère les tronçons de rue stationnables autour d'un point via
@@ -37,6 +38,7 @@ out geom tags;
 
     final resp = await _client.post(
       Uri.parse(_endpoint),
+      headers: const {'User-Agent': kUserAgent},
       body: {'data': query},
     );
     if (resp.statusCode != 200) {

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
+import '../config.dart';
+
 class GeocodingResult {
   GeocodingResult({required this.displayName, required this.location});
 
@@ -25,7 +27,10 @@ class GeocodingService {
       'addressdetails': '0',
       'accept-language': 'fr',
     });
-    final resp = await _client.get(uri);
+    final resp = await _client.get(uri, headers: const {
+      'User-Agent': kUserAgent,
+      'Accept': 'application/json',
+    });
     if (resp.statusCode != 200) {
       throw Exception('Nominatim HTTP ${resp.statusCode}');
     }
