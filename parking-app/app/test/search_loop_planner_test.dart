@@ -30,22 +30,20 @@ ScoredSegment scored({
 void main() {
   const planner = SearchLoopPlanner();
 
-  test('s arrête dès que la probabilité cumulée atteint le seuil', () {
-    final loop = planner.plan(
-      [for (var i = 0; i < 20; i++) scored(id: i, pFree: 0.7)],
-      dest,
-    );
-    // 1-(0.3)^2 = 0.91 >= 0.90 : deux tronçons suffisent.
-    expect(loop.orderedSegments.length, 2);
-    expect(loop.cumulativeProbability, greaterThanOrEqualTo(0.90));
+  test('décote les rues proches au lieu de les supposer indépendantes', () {
+    final loop = planner.plan([
+      for (var i = 0; i < 20; i++) scored(id: i, pFree: 0.7),
+    ], dest);
+    expect(loop.orderedSegments.length, greaterThan(2));
+    expect(loop.cumulativeProbability, lessThan(0.99));
+    expect(loop.isCalibrated, isFalse);
   });
 
   test('respecte le nombre maximal de tronçons', () {
-    final loop = planner.plan(
-      [for (var i = 0; i < 30; i++) scored(id: i, pFree: 0.1)],
-      dest,
-    );
-    expect(loop.orderedSegments.length, lessThanOrEqualTo(8));
+    final loop = planner.plan([
+      for (var i = 0; i < 30; i++) scored(id: i, pFree: 0.1),
+    ], dest);
+    expect(loop.orderedSegments.length, lessThanOrEqualTo(6));
   });
 
   test('exclut les rues trop loin pour marcher', () {
@@ -63,19 +61,19 @@ void main() {
     expect(loop.orderedSegments.first.segment.id, 1);
   });
 
-  test('probabilité cumulée = 1 - produit des échecs', () {
-    final loop = planner.plan(
-      [scored(id: 1, pFree: 0.5), scored(id: 2, pFree: 0.5)],
-      dest,
-    );
-    expect(loop.cumulativeProbability, closeTo(0.75, 1e-9));
+  test('la deuxième rue proche apporte un gain décoté', () {
+    final loop = planner.plan([
+      scored(id: 1, pFree: 0.5),
+      scored(id: 2, pFree: 0.5),
+    ], dest);
+    expect(loop.cumulativeProbability, greaterThan(0.5));
+    expect(loop.cumulativeProbability, lessThan(0.75));
   });
 
   test('temps de recherche espéré positif et borné par la boucle', () {
-    final loop = planner.plan(
-      [for (var i = 0; i < 5; i++) scored(id: i, pFree: 0.4)],
-      dest,
-    );
+    final loop = planner.plan([
+      for (var i = 0; i < 5; i++) scored(id: i, pFree: 0.4),
+    ], dest);
     final minutes = planner.expectedSearchMinutes(loop);
     expect(minutes, greaterThan(0));
     expect(minutes, lessThan(30));

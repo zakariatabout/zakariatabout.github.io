@@ -3,10 +3,9 @@
     "short_name": "ParkRadar",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#1565C0",
-    "description": "Guidage vers une place de stationnement dans la rue.",
-    "orientation": "portrait-primary",
+    "background_color": "#0D47A1",
+    "theme_color": "#0D47A1",
+    "description": "Aide à la recherche d'une rue de stationnement compatible, avec boucle guidée et estimation explicable.",
     "prefer_related_applications": false,
     "icons": [
         {

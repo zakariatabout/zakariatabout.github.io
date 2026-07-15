@@ -6,6 +6,22 @@
 
 ---
 
+> **Mise à jour d'exécution — 15 juillet 2026.** Les mentions « état actuel »
+> et les 34 tests ci-dessous décrivent le point de départ audité. Le chantier
+> P0/P1 a ensuite été développé sur la branche
+> `codex/etude-fiabilite-parkradar-2026` : UI honnête sans pourcentages non
+> calibrés, unités dérivées de l'inventaire Paris Data utilisées comme
+> garde-fou fail-closed, réseau typé,
+> IGN, guidage OSRM avec GPS qualifié et reroutage, session locale indépendante,
+> partage explicite par cellule, Edge Function limitée par IP, RPC/RLS/cron,
+> CI, suite Flutter complète, tests Edge et parsing PostgreSQL du schéma. Trois
+> portes externes restent volontairement
+> fermées : déploiement coordonné du backend Supabase, fournisseurs de
+> carte/routage avec SLA, et collecte de vérité terrain pour entraîner puis
+> calibrer la prédiction. Aucune de ces preuves n'est simulée par l'interface.
+
+---
+
 ## 0. Résumé exécutif
 
 ### Verdict

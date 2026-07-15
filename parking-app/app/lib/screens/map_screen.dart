@@ -2,849 +2,2075 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../config.dart';
+import '../controllers/parking_map_controller.dart';
+import '../design_system/design_system.dart';
+import '../models/availability_estimate.dart';
 import '../models/street_segment.dart';
-import '../services/community_adjuster.dart';
 import '../services/community_service.dart';
 import '../services/geocoding_service.dart';
+import '../services/location_service.dart';
 import '../services/overpass_service.dart';
 import '../services/paris_parking_service.dart';
-import '../services/probability_engine.dart';
+import '../services/paris_time.dart';
+import '../services/parking_eligibility_service.dart';
+import '../services/parking_session_store.dart';
+import '../services/route_progress_tracker.dart';
 import '../services/routing_service.dart';
-import '../services/search_loop_planner.dart';
+import '../widgets/widgets.dart';
 
+enum _ParkingSaveMode { deviceOnly, shareZone }
+
+/// Expérience cartographique principale de ParkRadar.
+///
+/// [ParkingMapController] reste l'unique source de vérité produit. Les seuls
+/// états locaux concernent le rendu de la carte, le suivi GPS et le HUD de
+/// navigation. Le constructeur injectable permet de tester l'écran sans GPS
+/// ni appels réseau.
 class MapScreen extends StatefulWidget {
-  const MapScreen({super.key});
+  const MapScreen({
+    super.key,
+    this.controller,
+    this.locationService,
+    this.parkingSessionStore,
+  });
+
+  final ParkingMapController? controller;
+  final LocationService? locationService;
+  final ParkingSessionStore? parkingSessionStore;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
 }
 
 class _MapScreenState extends State<MapScreen> {
+  static const _parisCenter = LatLng(48.8566, 2.3522);
+  static const _distance = Distance();
+
   final _mapController = MapController();
   final _searchController = TextEditingController();
-  final _geocoding = GeocodingService();
-  final _overpass = OverpassService();
-  final _routing = RoutingService();
-  final _engine = const ProbabilityEngine();
-  final _planner = const SearchLoopPlanner();
-  final _community = CommunityService();
-  final _adjuster = const CommunityAdjuster();
-  final _paris = ParisParkingService();
+  final _searchFocusNode = FocusNode();
+  final LayerHitNotifier<ParkingSpot> _legalHitNotifier = ValueNotifier(null);
 
-  static final _parisCenter = const LatLng(48.8566, 2.3522);
+  late final ParkingMapController _controller;
+  late final LocationService _locationService;
+  late final ParkingSessionStore _parkingSessionStore;
+  late final bool _ownsController;
 
-  Timer? _searchDebounce;
-  List<GeocodingResult> _suggestions = [];
-  bool _searching = false;
+  GeocodingService? _ownedGeocoding;
+  OverpassService? _ownedOverpass;
+  RoutingService? _ownedRouting;
+  CommunityService? _ownedCommunity;
+  ParisParkingService? _ownedParisParking;
 
-  LatLng? _destination;
-  List<StreetSegment> _rawSegments = [];
-  List<ScoredSegment> _scored = [];
-  SearchLoop? _loop;
-  DrivingRoute? _route;
-  LatLng? _myPosition;
-  bool _loadingZone = false;
-  bool _loadingRoute = false;
-  String? _error;
-  List<ParkingEvent> _communityEvents = [];
-  bool _reporting = false;
-  List<ParkingSpot> _parisSpots = [];
-  bool _showParisSpots = true;
+  StreamSubscription<LocationSample>? _positionSubscription;
+  int _trackingGeneration = 0;
+  late ParkingMapState _lastState;
+  final _routeProgressTracker = RouteProgressTracker();
+  int _guidanceStepIndex = 0;
+  bool _mapReady = false;
+  bool _tileUnavailable = false;
+  bool _parkedSharedWithCommunity = false;
+  int _parkingSessionGeneration = 0;
+  Future<void> _sessionStoreTail = Future<void>.value();
 
-  /// Heure d'arrivée simulée (curseur) ; null = maintenant.
-  int? _simulatedHour;
+  @override
+  void initState() {
+    super.initState();
+    _locationService = widget.locationService ?? const DeviceLocationService();
+    _parkingSessionStore =
+        widget.parkingSessionStore ?? SharedPreferencesParkingSessionStore();
+    _ownsController = widget.controller == null;
 
-  DateTime get _arrivalTime {
-    final now = DateTime.now();
-    if (_simulatedHour == null) return now;
-    return DateTime(now.year, now.month, now.day, _simulatedHour!);
+    if (widget.controller case final injected?) {
+      _controller = injected;
+    } else {
+      final geocoding = _ownedGeocoding = GeocodingService();
+      final overpass = _ownedOverpass = OverpassService();
+      final routing = _ownedRouting = RoutingService();
+      final community = _ownedCommunity = CommunityService();
+      final parisParking = _ownedParisParking = ParisParkingService();
+
+      _controller = ParkingMapController(
+        searchAddresses: geocoding.search,
+        fetchSegments: (center) => overpass.fetchSegments(center),
+        fetchSpots: (center) => parisParking.fetchSpotsOrThrow(center),
+        fetchEvents: (center) => community.recentEventsNearOrThrow(center),
+        fetchRoute: routing.route,
+        reportEvent: (type, position) async {
+          await community.reportOrThrow(type, position);
+          return true;
+        },
+        communityPollInterval: AppConfig.communityPollInterval,
+      );
+    }
+
+    _lastState = _controller.state;
+    _searchController.text = _lastState.query;
+    _controller.addListener(_handleControllerChanged);
+    unawaited(_restoreParkingSession());
   }
 
   @override
   void dispose() {
-    _searchDebounce?.cancel();
+    _controller.removeListener(_handleControllerChanged);
+    _trackingGeneration++;
+    final positionSubscription = _positionSubscription;
+    _positionSubscription = null;
+    unawaited(positionSubscription?.cancel());
+    if (_ownsController) {
+      _controller.dispose();
+      _ownedGeocoding?.close();
+      _ownedOverpass?.close();
+      _ownedRouting?.close();
+      _ownedCommunity?.close();
+      _ownedParisParking?.close();
+    }
+    _mapController.dispose();
+    _legalHitNotifier.dispose();
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
-  // ── Recherche d'adresse ────────────────────────────────────────────────
+  void _handleControllerChanged() {
+    final previous = _lastState;
+    final next = _controller.state;
+    _lastState = next;
 
-  void _onQueryChanged(String q) {
-    _searchDebounce?.cancel();
-    if (q.trim().length < 3) {
-      setState(() => _suggestions = []);
-      return;
-    }
-    _searchDebounce = Timer(const Duration(milliseconds: 450), () async {
-      setState(() => _searching = true);
-      try {
-        final results = await _geocoding.search(q);
-        if (!mounted) return;
-        setState(() => _suggestions = results);
-      } catch (_) {
-        if (!mounted) return;
-        setState(() => _error = 'Recherche d’adresse indisponible');
-      } finally {
-        if (mounted) setState(() => _searching = false);
-      }
-    });
-  }
-
-  Future<void> _selectDestination(GeocodingResult r) async {
-    FocusScope.of(context).unfocus();
-    setState(() {
-      _suggestions = [];
-      _searchController.text = r.displayName.split(',').first;
-      _destination = r.location;
-      _rawSegments = [];
-      _scored = [];
-      _loop = null;
-      _route = null;
-      _error = null;
-      _loadingZone = true;
-    });
-    _mapController.move(r.location, 16);
-
-    try {
-      final segments = await _overpass.fetchSegments(r.location);
-      if (!mounted) return;
-      setState(() => _rawSegments = segments);
-      _recompute();
-      _refreshCommunityEvents();
-      _refreshParisSpots();
-    } catch (_) {
-      if (!mounted) return;
-      setState(
-          () => _error = 'Impossible de charger les rues (réessayez)');
-    } finally {
-      if (mounted) setState(() => _loadingZone = false);
-    }
-  }
-
-  /// Recalcule probabilités + boucle (appelé après chargement, quand l'heure
-  /// simulée change et quand des signalements arrivent).
-  void _recompute() {
-    final dest = _destination;
-    if (dest == null || _rawSegments.isEmpty) return;
-    var scored = _engine.scoreAll(_rawSegments, _arrivalTime);
-    // Correction temps réel : uniquement pour une arrivée "maintenant".
-    if (_simulatedHour == null && _communityEvents.isNotEmpty) {
-      scored = _adjuster.adjust(scored, _communityEvents, DateTime.now());
-    }
-    final loop = _planner.plan(scored, dest);
-    setState(() {
-      _scored = scored;
-      _loop = loop;
-      _route = null;
-    });
-  }
-
-  Future<void> _refreshCommunityEvents() async {
-    final dest = _destination;
-    if (dest == null) return;
-    try {
-      final events = await _community.recentEventsNear(dest);
-      if (!mounted) return;
-      _communityEvents = events;
-      _recompute();
-    } catch (_) {
-      // Couche temps réel optionnelle : on ignore les échecs réseau.
-    }
-  }
-
-  Future<void> _refreshParisSpots() async {
-    final dest = _destination;
-    if (dest == null || !ParisParkingService.isInParis(dest)) {
-      if (_parisSpots.isNotEmpty) setState(() => _parisSpots = []);
-      return;
-    }
-    try {
-      final spots = await _paris.fetchSpots(dest);
-      if (!mounted) return;
-      setState(() => _parisSpots = spots);
-    } catch (_) {
-      // Couche optionnelle : on ignore les échecs.
-    }
-  }
-
-  Color _regimeColor(ParkingRegime r) => switch (r) {
-        ParkingRegime.payant => const Color(0xFF1E88E5),
-        ParkingRegime.gratuit => const Color(0xFF43A047),
-        ParkingRegime.resident => const Color(0xFF8E24AA),
-        ParkingRegime.moto => const Color(0xFF00897B),
-        ParkingRegime.velo => const Color(0xFF9CCC65),
-        ParkingRegime.livraison => const Color(0xFFF57C00),
-        ParkingRegime.handicap => const Color(0xFF3949AB),
-        ParkingRegime.taxi => const Color(0xFFFDD835),
-        ParkingRegime.autocar => const Color(0xFF6D4C41),
-        ParkingRegime.interdit => const Color(0xFFE53935),
-        ParkingRegime.autre => const Color(0xFF9E9E9E),
-      };
-
-  /// Signale « je me gare » (type 'parked') ou « je libère » (type 'freed')
-  /// à la position GPS actuelle.
-  Future<void> _reportEvent(String type) async {
-    setState(() => _reporting = true);
-    try {
-      final pos = await _locateMe(moveCamera: false);
-      if (pos == null) {
-        _showSnack('Position GPS indisponible');
-        return;
-      }
-      final ok = await _community.report(type, pos);
-      _showSnack(ok
-          ? (type == 'freed'
-              ? 'Merci ! Place signalée aux autres conducteurs'
-              : 'Bien garé ! Rue mise à jour')
-          : 'Signalement impossible (réessayez)');
-      if (ok) await _refreshCommunityEvents();
-    } finally {
-      if (mounted) setState(() => _reporting = false);
-    }
-  }
-
-  void _showSnack(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  // ── Guidage ────────────────────────────────────────────────────────────
-
-  Future<void> _startGuidance() async {
-    final loop = _loop;
-    if (loop == null || loop.orderedSegments.isEmpty) return;
-    setState(() {
-      _loadingRoute = true;
-      _error = null;
-    });
-    try {
-      LatLng? start = _myPosition ?? await _locateMe(moveCamera: false);
-      // Sans GPS, la boucle démarre à la destination.
-      start ??= _destination;
-      final waypoints = <LatLng>[
-        ?start,
-        for (final s in loop.orderedSegments.take(6)) s.segment.midpoint,
-      ];
-      final route = await _routing.route(waypoints);
-      if (!mounted) return;
-      if (route == null) {
-        setState(() => _error = 'Itinéraire indisponible');
-      } else {
-        setState(() => _route = route);
-        _fitCameraTo(route.points);
-      }
-    } finally {
-      if (mounted) setState(() => _loadingRoute = false);
-    }
-  }
-
-  Future<LatLng?> _locateMe({bool moveCamera = true}) async {
-    try {
-      var permission = await Geolocator.checkPermission()
-          .timeout(const Duration(seconds: 5));
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission()
-            .timeout(const Duration(seconds: 30));
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        return null;
-      }
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 12),
-        ),
+    if (!_searchFocusNode.hasFocus && _searchController.text != next.query) {
+      _searchController.value = TextEditingValue(
+        text: next.query,
+        selection: TextSelection.collapsed(offset: next.query.length),
       );
-      final latLng = LatLng(pos.latitude, pos.longitude);
-      if (!mounted) return latLng;
-      setState(() => _myPosition = latLng);
-      if (moveCamera) _mapController.move(latLng, 16);
-      return latLng;
-    } catch (_) {
-      return null;
     }
+
+    if (previous.destination != next.destination && next.destination != null) {
+      _afterMapReady(() => _mapController.move(next.destination!, 16));
+    }
+    if (!identical(previous.route, next.route) && next.route != null) {
+      _syncGuidanceStep(next);
+      if (next.phase == ParkingMapPhase.preview) {
+        _afterMapReady(() => _fitCameraTo(next.route!.points));
+      }
+    } else if (next.phase == ParkingMapPhase.guiding) {
+      _syncGuidanceStep(next);
+    }
+
+    if (previous.phase == ParkingMapPhase.guiding &&
+        next.phase != ParkingMapPhase.guiding) {
+      unawaited(_stopPositionTracking());
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _afterMapReady(VoidCallback action) {
+    if (_mapReady) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _mapReady) action();
+      });
+    }
+  }
+
+  void _onMapReady() {
+    _mapReady = true;
+    final state = _controller.state;
+    if (state.route != null && state.phase == ParkingMapPhase.preview) {
+      _fitCameraTo(state.route!.points);
+    } else if (state.destination != null) {
+      _mapController.move(state.destination!, 16);
+    }
+  }
+
+  void _syncGuidanceStep(ParkingMapState state) {
+    final route = state.route;
+    if (route == null || route.steps.isEmpty || state.userPosition == null) {
+      return;
+    }
+    _guidanceStepIndex = _routeProgressTracker
+        .update(route, state.userPosition!)
+        .stepIndex;
   }
 
   void _fitCameraTo(List<LatLng> points) {
-    if (points.isEmpty) return;
+    if (!_mapReady || points.isEmpty) return;
+    final size = MediaQuery.sizeOf(context);
+    final sidePanel = ParkRadarBreakpoints.usesSidePanel(size);
     _mapController.fitCamera(
       CameraFit.coordinates(
         coordinates: points,
-        padding: const EdgeInsets.fromLTRB(40, 120, 40, 220),
+        padding: sidePanel
+            ? const EdgeInsets.fromLTRB(72, 120, 472, 72)
+            : const EdgeInsets.fromLTRB(40, 120, 40, 300),
       ),
     );
   }
 
-  // ── Rendu ──────────────────────────────────────────────────────────────
-
-  /// Couleur en dégradé continu rouge → orange → vert selon la probabilité.
-  /// Le dégradé (plutôt que 3 paliers) fait ressortir les rues « les moins
-  /// pires » même quand tout le quartier est chargé.
-  Color _probColor(double p) {
-    // On étale [0.15 .. 0.85] sur la teinte rouge(0°) → vert(120°) pour que
-    // les différences dans la plage utile ressortent bien.
-    final t = ((p - 0.15) / 0.70).clamp(0.0, 1.0);
-    return HSVColor.fromAHSV(1.0, t * 120.0, 0.72, 0.82).toColor();
-  }
-
-  /// Formulation honnête du niveau de chances cumulé (évite le « 100 % »
-  /// trompeur au-dessus d'un quartier plein).
-  ({String label, IconData icon}) _qualitative(double cumulative) {
-    if (cumulative >= 0.85) {
-      return (label: 'Très bonnes chances', icon: Icons.sentiment_very_satisfied);
+  Future<LatLng?> _requestCurrentLocation({bool moveCamera = false}) async {
+    late final LocationResult result;
+    try {
+      result = await _locationService.current();
+    } catch (_) {
+      if (mounted) _showSnack('Position indisponible pour le moment.');
+      return null;
     }
-    if (cumulative >= 0.6) {
-      return (label: 'Bonnes chances', icon: Icons.sentiment_satisfied);
-    }
-    if (cumulative >= 0.35) {
-      return (label: 'Chances moyennes', icon: Icons.sentiment_neutral);
-    }
-    return (label: 'Stationnement difficile', icon: Icons.sentiment_dissatisfied);
-  }
-
-  Widget _legend() {
-    Widget item(double p, String txt) => Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 11,
-              height: 11,
-              decoration:
-                  BoxDecoration(color: _probColor(p), shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 4),
-            Text(txt, style: const TextStyle(fontSize: 11)),
-          ],
+    if (!mounted) return null;
+    final sample = result.sample;
+    if (sample != null) {
+      if (!sample.isUsable(DateTime.now())) {
+        _showSnack(
+          'Précision GPS insuffisante (±${sample.accuracyMeters.round()} m). '
+          'Réessayez à ciel ouvert.',
         );
-    return Material(
-      elevation: 3,
-      borderRadius: BorderRadius.circular(12),
-      color: Colors.white,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            item(0.1, 'Peu'),
-            const SizedBox(width: 10),
-            item(0.4, 'Moyen'),
-            const SizedBox(width: 10),
-            item(0.65, 'Bonnes'),
-          ],
-        ),
-      ),
+        return null;
+      }
+      _controller.updateUserPosition(sample.position);
+      if (moveCamera && _mapReady) _mapController.move(sample.position, 17);
+      return sample.position;
+    }
+
+    final canOpenSettings =
+        result.failure == LocationFailure.servicesDisabled ||
+        result.failure == LocationFailure.permissionDeniedForever;
+    _showSnack(
+      result.userMessage,
+      actionLabel: canOpenSettings ? 'Réglages' : null,
+      onAction: canOpenSettings ? _locationService.openSettings : null,
     );
+    return null;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final loop = _loop;
-    final loopIds = {
-      if (loop != null)
-        for (final s in loop.orderedSegments) s.segment.id,
-    };
+  Future<void> _previewRoute() async {
+    final state = _controller.state;
+    await _controller.previewRoute(origin: state.userPosition);
+  }
 
-    return Scaffold(
-      body: Stack(
-        children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _parisCenter,
-              initialZoom: 13,
-              onTap: (_, _) => setState(() => _suggestions = []),
-            ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'fr.zakariatabout.parking_app',
-              ),
-              // Carte de chaleur des probabilités.
-              PolylineLayer(
-                polylines: [
-                  for (final s in _scored)
-                    Polyline(
-                      points: s.segment.points,
-                      strokeWidth: loopIds.contains(s.segment.id) ? 7 : 4,
-                      color: _probColor(s.probabilityFree).withValues(
-                        alpha: loopIds.contains(s.segment.id) ? 0.95 : 0.55,
-                      ),
-                    ),
-                ],
-              ),
-              // Places réelles de Paris, colorées par régime (open data Ville).
-              if (_showParisSpots && _parisSpots.isNotEmpty)
-                PolylineLayer(
-                  polylines: [
-                    for (final spot in _parisSpots)
-                      Polyline(
-                        points: spot.points,
-                        strokeWidth: 5,
-                        color: _regimeColor(spot.regime),
-                      ),
-                  ],
-                ),
-              // Itinéraire de guidage.
-              if (_route != null)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: _route!.points,
-                      strokeWidth: 5,
-                      color: const Color(0xFF1565C0).withValues(alpha: 0.9),
-                    ),
-                  ],
-                ),
-              MarkerLayer(
-                markers: [
-                  // Places libérées récemment par la communauté.
-                  for (final e in _communityEvents.where((e) => e.isFreed))
-                    Marker(
-                      point: e.position,
-                      width: 24,
-                      height: 24,
-                      child: Container(
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF00897B),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 2),
-                        ),
-                        child: const Text(
-                          'P',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                    ),
-                  if (_destination != null)
-                    Marker(
-                      point: _destination!,
-                      width: 44,
-                      height: 44,
-                      alignment: Alignment.topCenter,
-                      child: const Icon(Icons.location_pin,
-                          size: 44, color: Color(0xFF1565C0)),
-                    ),
-                  if (_myPosition != null)
-                    Marker(
-                      point: _myPosition!,
-                      width: 22,
-                      height: 22,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1565C0),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 3),
-                        ),
-                      ),
-                    ),
-                  // Numéros d'ordre de la boucle de recherche.
-                  if (loop != null)
-                    for (final (i, s) in loop.orderedSegments.indexed)
-                      Marker(
-                        point: s.segment.midpoint,
-                        width: 26,
-                        height: 26,
-                        child: Container(
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: _probColor(s.probabilityFree),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 2),
-                          ),
-                          child: Text(
-                            '${i + 1}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ),
-                      ),
-                ],
-              ),
-            ],
+  Future<void> _startGuidance() async {
+    // Une vraie navigation part toujours d'une mesure GPS fraîche. La
+    // destination n'est jamais utilisée comme origine de secours.
+    final origin = await _requestCurrentLocation();
+    if (origin == null || !mounted) return;
+    final started = await _controller.startGuidance(origin);
+    if (!started || !mounted) return;
+    if (_mapReady) _mapController.move(origin, 17);
+    await _startPositionTracking();
+  }
+
+  Future<void> _startPositionTracking() async {
+    final generation = ++_trackingGeneration;
+    final previous = _positionSubscription;
+    _positionSubscription = null;
+    await previous?.cancel();
+    if (!mounted ||
+        generation != _trackingGeneration ||
+        _controller.state.phase != ParkingMapPhase.guiding) {
+      return;
+    }
+    try {
+      final subscription = _locationService.watch().listen(
+        (sample) {
+          if (!mounted ||
+              generation != _trackingGeneration ||
+              _controller.state.phase != ParkingMapPhase.guiding) {
+            return;
+          }
+          if (!sample.isUsable(DateTime.now(), maxAccuracyMeters: 60)) return;
+          _controller.updateUserPosition(sample.position);
+          if (_mapReady) {
+            _mapController.move(sample.position, 17);
+          }
+        },
+        onError: (Object _) {
+          if (!mounted || generation != _trackingGeneration) return;
+          _showSnack('Suivi GPS interrompu. Le guidage a été arrêté.');
+          _controller.stopGuidance();
+        },
+      );
+      if (!mounted ||
+          generation != _trackingGeneration ||
+          _controller.state.phase != ParkingMapPhase.guiding) {
+        await subscription.cancel();
+        return;
+      }
+      _positionSubscription = subscription;
+    } catch (_) {
+      if (!mounted || generation != _trackingGeneration) return;
+      _showSnack('Suivi GPS indisponible. Le guidage a été arrêté.');
+      _controller.stopGuidance();
+    }
+  }
+
+  Future<void> _stopPositionTracking() async {
+    _trackingGeneration++;
+    final subscription = _positionSubscription;
+    _positionSubscription = null;
+    await subscription?.cancel();
+  }
+
+  void _stopGuidance() {
+    unawaited(_stopPositionTracking());
+    _controller.stopGuidance();
+  }
+
+  Future<void> _reportParked() async {
+    if (_controller.state.phase != ParkingMapPhase.guiding) return;
+    final position = await _requestCurrentLocation();
+    if (position == null || !mounted) return;
+    final saveMode = await _chooseParkingSaveMode();
+    if (saveMode == null || !mounted) return;
+    final parkedAt = DateTime.now();
+    final share = saveMode == _ParkingSaveMode.shareZone;
+    final sessionGeneration = ++_parkingSessionGeneration;
+    // `sharedWithCommunity` décrit un fait confirmé par le backend, pas une
+    // intention de partage. La session reste donc locale jusqu'au succès du
+    // POST `parked`.
+    _parkedSharedWithCommunity = false;
+    _controller.rememberParkedLocally(position, parkedAt: parkedAt);
+    try {
+      await _enqueueSessionStore(
+        () => _parkingSessionStore.save(
+          position,
+          parkedAt,
+          sharedWithCommunity: false,
+        ),
+      );
+    } catch (_) {
+      if (mounted) {
+        _showSnack(
+          'Stationnement mémorisé pour cette session, mais la sauvegarde locale a échoué.',
+        );
+      }
+    }
+    await _stopPositionTracking();
+    _controller.stopGuidance();
+    final state = _controller.state;
+    final isStillActive =
+        sessionGeneration == _parkingSessionGeneration &&
+        state.parkedPosition == position &&
+        state.parkedAt == parkedAt;
+    if (share && isStillActive) {
+      unawaited(_shareParkedAndConfirm(position, parkedAt, sessionGeneration));
+    }
+  }
+
+  Future<void> _reportFreed() async {
+    final position = _controller.state.parkedPosition;
+    if (position == null) return;
+    final share = _parkedSharedWithCommunity;
+    _parkingSessionGeneration++;
+    _parkedSharedWithCommunity = false;
+    _controller.clearParkedLocally();
+    try {
+      await _enqueueSessionStore(_parkingSessionStore.clear);
+    } catch (_) {
+      if (mounted) {
+        _showSnack('Place libérée, mais le nettoyage local a échoué.');
+      }
+    }
+    if (share) {
+      unawaited(_shareCommunityEvent('freed', position));
+    }
+  }
+
+  Future<void> _shareParkedAndConfirm(
+    LatLng position,
+    DateTime parkedAt,
+    int sessionGeneration,
+  ) async {
+    final success = await _shareCommunityEvent('parked', position);
+    if (!success) return;
+
+    final state = _controller.state;
+    final isStillActive =
+        sessionGeneration == _parkingSessionGeneration &&
+        state.parkedPosition == position &&
+        state.parkedAt == parkedAt;
+    if (!isStillActive) {
+      // La personne a pu libérer la place pendant le POST. Puisque `parked`
+      // vient seulement d'être confirmé, compenser sans ressusciter la session.
+      unawaited(_shareCommunityEvent('freed', position));
+      return;
+    }
+
+    _parkedSharedWithCommunity = true;
+    try {
+      await _enqueueSessionStore(
+        () => _parkingSessionStore.save(
+          position,
+          parkedAt,
+          sharedWithCommunity: true,
+        ),
+      );
+    } catch (_) {
+      if (mounted) {
+        _showSnack(
+          'Partage confirmé, mais son état n’a pas pu être sauvegardé localement.',
+        );
+      }
+    }
+
+    final currentState = _controller.state;
+    final remainsActive =
+        sessionGeneration == _parkingSessionGeneration &&
+        currentState.parkedPosition == position &&
+        currentState.parkedAt == parkedAt;
+    if (!remainsActive) {
+      _parkedSharedWithCommunity = false;
+      try {
+        await _enqueueSessionStore(() async {
+          final saved = await _parkingSessionStore.load();
+          if (saved?.position == position && saved?.parkedAt == parkedAt) {
+            await _parkingSessionStore.clear();
+          }
+        });
+      } catch (_) {
+        // Le nettoyage principal a déjà été tenté par `_reportFreed`.
+      }
+    }
+  }
+
+  Future<void> _enqueueSessionStore(Future<void> Function() operation) {
+    final result = _sessionStoreTail.then((_) => operation());
+    _sessionStoreTail = result.then<void>((_) {}, onError: (_, _) {});
+    return result;
+  }
+
+  Future<bool> _shareCommunityEvent(String type, LatLng position) async {
+    final success = await _controller.shareCommunityEvent(type, position);
+    if (!success && mounted) {
+      _showSnack(
+        type == 'parked'
+            ? 'Stationnement mémorisé localement ; partage communautaire indisponible.'
+            : 'Session terminée localement ; signal de libération non transmis.',
+      );
+    }
+    return success;
+  }
+
+  Future<_ParkingSaveMode?> _chooseParkingSaveMode() {
+    return showDialog<_ParkingSaveMode>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mémoriser votre stationnement'),
+        content: const Text(
+          'ParkRadar peut transmettre une zone arrondie d’environ 70 à 110 m. '
+          'Le flux public ne montre pas votre GPS exact et tronque '
+          'l’horodatage à la minute ; la ligne privée est supprimée après '
+          'environ 24 heures. Vous pouvez aussi tout conserver uniquement sur cet '
+          'appareil.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annuler'),
           ),
-
-          // Barre de recherche + suggestions.
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                children: [
-                  Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(28),
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: _onQueryChanged,
-                      textInputAction: TextInputAction.search,
-                      decoration: InputDecoration(
-                        hintText: 'Où allez-vous ?',
-                        prefixIcon: const Icon(Icons.search),
-                        suffixIcon: _searching
-                            ? const Padding(
-                                padding: EdgeInsets.all(12),
-                                child: SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              )
-                            : null,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(28),
-                          borderSide: BorderSide.none,
-                        ),
-                        filled: true,
-                        fillColor: Colors.white,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 14),
-                      ),
-                    ),
-                  ),
-                  if (_suggestions.isNotEmpty)
-                    Container(
-                      margin: const EdgeInsets.only(top: 6),
-                      constraints: const BoxConstraints(maxHeight: 260),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: const [
-                          BoxShadow(blurRadius: 8, color: Colors.black26),
-                        ],
-                      ),
-                      child: ListView.separated(
-                        shrinkWrap: true,
-                        padding: EdgeInsets.zero,
-                        itemCount: _suggestions.length,
-                        separatorBuilder: (_, _) => const Divider(height: 1),
-                        itemBuilder: (context, i) {
-                          final s = _suggestions[i];
-                          return ListTile(
-                            dense: true,
-                            leading: const Icon(Icons.place_outlined),
-                            title: Text(
-                              s.displayName,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            onTap: () => _selectDestination(s),
-                          );
-                        },
-                      ),
-                    ),
-                ],
-              ),
-            ),
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, _ParkingSaveMode.deviceOnly),
+            child: const Text('Sur cet appareil'),
           ),
-
-          // Légende des couleurs.
-          if (_scored.isNotEmpty && _suggestions.isEmpty)
-            Positioned(
-              top: 74,
-              left: 12,
-              child: SafeArea(child: _legend()),
-            ),
-
-          // Bouton "ma position".
-          Positioned(
-            right: 12,
-            bottom: loop != null ? 235 : 40,
-            child: FloatingActionButton.small(
-              heroTag: 'locate',
-              backgroundColor: Colors.white,
-              onPressed: _locateMe,
-              child: const Icon(Icons.my_location, color: Color(0xFF1565C0)),
-            ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _ParkingSaveMode.shareZone),
+            child: const Text('Partager la zone'),
           ),
-
-          // Bouton bascule des places réelles (Paris uniquement).
-          if (_parisSpots.isNotEmpty)
-            Positioned(
-              right: 12,
-              bottom: loop != null ? 285 : 90,
-              child: FloatingActionButton.small(
-                heroTag: 'parisSpots',
-                backgroundColor:
-                    _showParisSpots ? const Color(0xFF1565C0) : Colors.white,
-                onPressed: () =>
-                    setState(() => _showParisSpots = !_showParisSpots),
-                tooltip: 'Afficher/masquer les places réelles',
-                child: Icon(
-                  Icons.local_parking,
-                  color: _showParisSpots ? Colors.white : const Color(0xFF1565C0),
-                ),
-              ),
-            ),
-
-          if (_loadingZone)
-            const Center(
-              child: Card(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 12),
-                      Text('Analyse des rues autour de la destination…'),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-          if (_error != null)
-            Positioned(
-              left: 12,
-              right: 12,
-              bottom: loop != null ? 235 : 40,
-              child: Card(
-                color: Colors.red.shade50,
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Text(_error!,
-                      style: TextStyle(color: Colors.red.shade900)),
-                ),
-              ),
-            ),
-
-          // Panneau d'information de la boucle.
-          if (loop != null)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: _buildLoopPanel(loop),
-            ),
         ],
       ),
     );
   }
 
-  /// Résumé des régimes réels (open data Paris) autour de la destination :
-  /// petites puces colorées avec le % de chaque type.
-  Widget _regimeSummary() {
-    final counts = <ParkingRegime, int>{};
-    for (final s in _parisSpots) {
-      counts[s.regime] = (counts[s.regime] ?? 0) + 1;
+  Future<void> _restoreParkingSession() async {
+    try {
+      final session = await _parkingSessionStore.load();
+      if (!mounted || session == null) return;
+      _parkedSharedWithCommunity = session.sharedWithCommunity;
+      _controller.restoreParkedSession(session.position, session.parkedAt);
+    } catch (_) {
+      // Une préférence locale corrompue ne doit jamais bloquer la carte.
     }
-    final total = _parisSpots.length;
-    final entries = counts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final top = entries.take(4);
+  }
 
+  void _showSnack(
+    String message, {
+    String? actionLabel,
+    Future<bool> Function()? onAction,
+  }) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: actionLabel == null || onAction == null
+            ? null
+            : SnackBarAction(
+                label: actionLabel,
+                onPressed: () => unawaited(onAction()),
+              ),
+      ),
+    );
+  }
+
+  Future<void> _openMapAttribution() async {
+    final opened = await launchUrl(
+      Uri.parse('https://www.openstreetmap.org/copyright'),
+    );
+    if (!opened && mounted) {
+      _showSnack('Impossible d’ouvrir les informations cartographiques.');
+    }
+  }
+
+  Future<void> _pickArrivalHour() async {
+    final state = _controller.state;
+    final initial =
+        state.plannedArrival ??
+        atParis(DateTime.now()).add(const Duration(hours: 1));
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: initial.hour, minute: 0),
+      helpText: 'Heure d’arrivée (heure pleine)',
+      confirmText: 'Planifier',
+      cancelText: 'Annuler',
+    );
+    if (picked != null && mounted) {
+      _controller.setArrivalHour(picked.hour);
+    }
+  }
+
+  void _zoomBy(double delta) {
+    if (!_mapReady) return;
+    final camera = _mapController.camera;
+    final nextZoom = (camera.zoom + delta).clamp(11.0, 20.0);
+    _mapController.move(camera.center, nextZoom);
+  }
+
+  void _onTileError() {
+    if (_tileUnavailable || !mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_tileUnavailable) {
+        setState(() => _tileUnavailable = true);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = _controller.state;
+    return Scaffold(
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final sidePanel = ParkRadarBreakpoints.usesSidePanel(
+            constraints.biggest,
+          );
+          final mode = _layerMode(state);
+          return Stack(
+            children: [
+              Positioned.fill(child: _buildMap(state, mode, sidePanel)),
+              _buildMapControls(state, sidePanel),
+              _buildTopOverlay(state, mode),
+              if (state.phase == ParkingMapPhase.loading)
+                const _MapLoadingCard(),
+              if (state.phase != ParkingMapPhase.loading)
+                _buildResponsivePanel(state),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMap(ParkingMapState state, _MapLayerMode mode, bool sidePanel) {
+    final colors = context.parkRadarColors;
+    return FlutterMap(
+      mapController: _mapController,
+      options: MapOptions(
+        initialCenter: _parisCenter,
+        initialZoom: 13,
+        minZoom: 11,
+        maxZoom: 20,
+        backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
+        onMapReady: _onMapReady,
+        onTap: (_, _) {
+          _searchFocusNode.unfocus();
+          _controller.dismissSuggestions();
+        },
+      ),
+      children: [
+        TileLayer(
+          urlTemplate: AppConfig.mapTileUrlTemplate,
+          userAgentPackageName: 'fr.zakariatabout.parking_app',
+          maxNativeZoom: 19,
+          evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
+          errorTileCallback: (_, _, _) => _onTileError(),
+        ),
+        if (mode == _MapLayerMode.availability)
+          PolylineLayer(polylines: _availabilityPolylines(state, colors)),
+        if (mode == _MapLayerMode.legal)
+          GestureDetector(
+            onTap: _openTouchedLegalSpot,
+            child: PolylineLayer<ParkingSpot>(
+              hitNotifier: _legalHitNotifier,
+              minimumHitbox: ParkRadarSizes.minimumTouchTarget / 2,
+              polylines: _legalPolylines(state, colors),
+            ),
+          ),
+        if (mode == _MapLayerMode.route) ...[
+          PolylineLayer(
+            polylines: _availabilityPolylines(state, colors, loopOnly: true),
+          ),
+          if (state.route != null)
+            PolylineLayer(
+              polylines: [
+                Polyline(
+                  points: state.route!.points,
+                  strokeWidth: 7,
+                  borderStrokeWidth: 3,
+                  borderColor: colors.routeCasing,
+                  color: colors.route,
+                ),
+              ],
+            ),
+        ],
+        MarkerLayer(markers: _markers(state, mode, colors)),
+        _MapAttribution(
+          alignment: sidePanel
+              ? Alignment.bottomLeft
+              : const Alignment(-1, -0.25),
+          label: '${AppConfig.mapTileAttribution} · Ville de Paris',
+          onTap: _openMapAttribution,
+        ),
+      ],
+    );
+  }
+
+  List<Polyline> _availabilityPolylines(
+    ParkingMapState state,
+    ParkRadarColors colors, {
+    bool loopOnly = false,
+  }) {
+    final loopIds = {
+      for (final segment
+          in state.loop?.orderedSegments ?? const <ScoredSegment>[])
+        segment.segment.id,
+    };
+    return [
+      for (final scored in state.scoredSegments)
+        if (state.eligibility[scored.segment.id]?.canRecommend == true &&
+            scored.probabilityFree > 0.01 &&
+            (!loopOnly || loopIds.contains(scored.segment.id)))
+          _availabilityPolyline(
+            scored,
+            colors,
+            emphasized: loopIds.contains(scored.segment.id),
+          ),
+    ];
+  }
+
+  Polyline _availabilityPolyline(
+    ScoredSegment scored,
+    ParkRadarColors colors, {
+    required bool emphasized,
+  }) {
+    final level = _availabilityLevel(scored.probabilityFree);
+    final tone = switch (level) {
+      _AvailabilityLevel.low => colors.confidenceLow,
+      _AvailabilityLevel.medium => colors.confidenceMedium,
+      _AvailabilityLevel.high => colors.confidenceHigh,
+    };
+    final pattern = switch (level) {
+      _AvailabilityLevel.low => StrokePattern.dashed(segments: const [8, 7]),
+      _AvailabilityLevel.medium => const StrokePattern.dotted(
+        spacingFactor: 1.8,
+      ),
+      _AvailabilityLevel.high => const StrokePattern.solid(),
+    };
+    return Polyline(
+      points: scored.segment.points,
+      strokeWidth: emphasized ? 7 : 5,
+      borderStrokeWidth: level == _AvailabilityLevel.high ? 2 : 0,
+      borderColor: tone.background,
+      color: tone.foreground.withValues(alpha: emphasized ? 0.96 : 0.82),
+      pattern: pattern,
+    );
+  }
+
+  List<Polyline<ParkingSpot>> _legalPolylines(
+    ParkingMapState state,
+    ParkRadarColors colors,
+  ) {
+    return [
+      for (final spot in state.parisSpots)
+        Polyline(
+          points: spot.points,
+          strokeWidth: 7,
+          borderStrokeWidth: 2,
+          borderColor: Theme.of(context).colorScheme.surface,
+          color: _legalColor(spot.regime, colors),
+          pattern: _legalPattern(spot.regime),
+          hitValue: spot,
+        ),
+    ];
+  }
+
+  Color _legalColor(ParkingRegime regime, ParkRadarColors colors) {
+    return switch (regime) {
+      ParkingRegime.payant => colors.brand,
+      ParkingRegime.gratuit => colors.success.foreground,
+      ParkingRegime.resident => colors.confidenceLow.foreground,
+      ParkingRegime.interdit => colors.danger.foreground,
+      ParkingRegime.moto ||
+      ParkingRegime.velo ||
+      ParkingRegime.livraison ||
+      ParkingRegime.handicap ||
+      ParkingRegime.taxi ||
+      ParkingRegime.autocar => colors.warning.foreground,
+      ParkingRegime.autre => colors.neutral.foreground,
+    };
+  }
+
+  StrokePattern _legalPattern(ParkingRegime regime) {
+    return switch (regime) {
+      ParkingRegime.payant => const StrokePattern.solid(),
+      ParkingRegime.gratuit => const StrokePattern.dotted(spacingFactor: 2.2),
+      ParkingRegime.resident => StrokePattern.dashed(segments: const [12, 4]),
+      ParkingRegime.interdit => const StrokePattern.dotted(spacingFactor: 1.4),
+      ParkingRegime.autre => const StrokePattern.solid(),
+      _ => StrokePattern.dashed(segments: const [4, 5]),
+    };
+  }
+
+  void _openTouchedLegalSpot() {
+    final hits = _legalHitNotifier.value?.hitValues;
+    if (hits == null || hits.isEmpty || !mounted) return;
+    unawaited(_showLegalSpotDetails(hits.first));
+  }
+
+  Future<void> _showLegalSpotDetails(ParkingSpot spot) {
+    final capacity = switch ((spot.capacity, spot.capacitySource)) {
+      (final int count, ParkingCapacitySource.actual) =>
+        '$count place${count > 1 ? 's' : ''} relevée${count > 1 ? 's' : ''}',
+      (final int count, ParkingCapacitySource.calculated) =>
+        '$count place${count > 1 ? 's' : ''} calculée${count > 1 ? 's' : ''} par la source',
+      (final int count, null) =>
+        '$count place${count > 1 ? 's' : ''} publiée${count > 1 ? 's' : ''}',
+      _ => 'Capacité non renseignée',
+    };
+    final updatedAt = spot.sourceUpdatedAt;
+    final sourceDate = updatedAt == null
+        ? 'Date de mise à jour non renseignée'
+        : 'Source mise à jour ${_formatSourceDate(updatedAt)} '
+              '(${_formatDataAge(DateTime.now().difference(updatedAt))})';
+    return showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          key: const Key('legal-spot-details-sheet'),
+          padding: const EdgeInsets.fromLTRB(
+            ParkRadarSpacing.md,
+            0,
+            ParkRadarSpacing.md,
+            ParkRadarSpacing.lg,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                spot.regime.label,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: ParkRadarSpacing.xs),
+              Text(spot.streetName ?? 'Voie non renseignée'),
+              const SizedBox(height: ParkRadarSpacing.xs),
+              Text(capacity),
+              Text(sourceDate),
+              if (spot.rawLabel case final rawLabel?)
+                Text(
+                  'Régime source : $rawLabel',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              const SizedBox(height: ParkRadarSpacing.sm),
+              Text(
+                'Inventaire Ville de Paris. Vérifiez toujours la '
+                'signalisation présente sur place.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Marker> _markers(
+    ParkingMapState state,
+    _MapLayerMode mode,
+    ParkRadarColors colors,
+  ) {
+    final markers = <Marker>[];
+    for (final event in state.communityEvents.take(24)) {
+      final age = _formatAge(DateTime.now().difference(event.createdAt));
+      final tone = event.isFreed ? colors.success : colors.danger;
+      final sign = event.isFreed ? '+' : '−';
+      markers.add(
+        Marker(
+          point: event.position,
+          width: 88,
+          height: 34,
+          child: Semantics(
+            label: event.isFreed
+                ? 'Signal de place libérée dans cette zone il y a $age'
+                : 'Signal de place prise dans cette zone il y a $age',
+            child: ExcludeSemantics(
+              child: Material(
+                color: tone.background,
+                shape: StadiumBorder(side: BorderSide(color: tone.border)),
+                elevation: 2,
+                child: Center(
+                  child: Text(
+                    'P $sign · $age',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: tone.foreground,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (state.destination case final destination?) {
+      markers.add(
+        Marker(
+          point: destination,
+          width: 48,
+          height: 48,
+          alignment: Alignment.topCenter,
+          child: Semantics(
+            label: 'Destination',
+            child: ExcludeSemantics(
+              child: Icon(
+                Icons.location_pin,
+                size: 48,
+                color: colors.brand,
+                shadows: const [Shadow(color: Colors.black38, blurRadius: 4)],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (state.userPosition case final userPosition?) {
+      markers.add(
+        Marker(
+          point: userPosition,
+          width: 28,
+          height: 28,
+          child: Semantics(
+            label: 'Votre position',
+            child: ExcludeSemantics(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: colors.route,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: colors.routeCasing, width: 4),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 5),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (mode != _MapLayerMode.legal && state.loop != null) {
+      for (final (index, scored) in state.loop!.orderedSegments.indexed) {
+        final level = _availabilityLevel(scored.probabilityFree);
+        final tone = switch (level) {
+          _AvailabilityLevel.low => colors.confidenceLow,
+          _AvailabilityLevel.medium => colors.confidenceMedium,
+          _AvailabilityLevel.high => colors.confidenceHigh,
+        };
+        markers.add(
+          Marker(
+            point: scored.segment.midpoint,
+            width: 30,
+            height: 30,
+            child: Semantics(
+              label: 'Étape ${index + 1}, ${scored.segment.name}',
+              child: ExcludeSemantics(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: tone.background,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: tone.foreground, width: 2),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '${index + 1}',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: tone.foreground,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+    return markers;
+  }
+
+  Widget _buildMapControls(ParkingMapState state, bool sidePanel) {
+    if (state.suggestions.isNotEmpty || (!sidePanel && state.notice != null)) {
+      return const SizedBox.shrink();
+    }
+    final colors = context.parkRadarColors;
+    final showLegalToggle =
+        state.parisSpots.isNotEmpty &&
+        state.phase != ParkingMapPhase.preview &&
+        state.phase != ParkingMapPhase.guiding;
+    return Align(
+      alignment: sidePanel ? Alignment.centerLeft : const Alignment(1, -0.48),
+      child: SafeArea(
+        minimum: const EdgeInsets.all(ParkRadarSpacing.sm),
+        child: SizedBox(
+          width: ParkRadarSizes.minimumTouchTarget,
+          child: Material(
+            color: colors.mapControlSurface,
+            elevation: 3,
+            borderRadius: ParkRadarRadii.control,
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  onPressed: _mapReady ? () => _zoomBy(1) : null,
+                  tooltip: 'Zoomer',
+                  color: colors.mapControlForeground,
+                  constraints: const BoxConstraints.tightFor(
+                    width: ParkRadarSizes.minimumTouchTarget,
+                    height: ParkRadarSizes.minimumTouchTarget,
+                  ),
+                  icon: const Icon(Icons.add),
+                ),
+                Divider(
+                  height: 1,
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+                IconButton(
+                  onPressed: _mapReady ? () => _zoomBy(-1) : null,
+                  tooltip: 'Dézoomer',
+                  color: colors.mapControlForeground,
+                  constraints: const BoxConstraints.tightFor(
+                    width: ParkRadarSizes.minimumTouchTarget,
+                    height: ParkRadarSizes.minimumTouchTarget,
+                  ),
+                  icon: const Icon(Icons.remove),
+                ),
+                Divider(
+                  height: 1,
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+                IconButton(
+                  onPressed: () =>
+                      unawaited(_requestCurrentLocation(moveCamera: true)),
+                  tooltip: 'Afficher ma position',
+                  color: colors.mapControlForeground,
+                  constraints: const BoxConstraints.tightFor(
+                    width: ParkRadarSizes.minimumTouchTarget,
+                    height: ParkRadarSizes.minimumTouchTarget,
+                  ),
+                  icon: const Icon(Icons.my_location),
+                ),
+                if (showLegalToggle) ...[
+                  Divider(
+                    height: 1,
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                  Semantics(
+                    selected: state.showLegalLayer,
+                    child: IconButton(
+                      onPressed: _controller.toggleLegalLayer,
+                      tooltip: state.showLegalLayer
+                          ? 'Afficher les estimations'
+                          : 'Afficher la réglementation',
+                      color: state.showLegalLayer
+                          ? colors.brand
+                          : colors.mapControlForeground,
+                      constraints: const BoxConstraints.tightFor(
+                        width: ParkRadarSizes.minimumTouchTarget,
+                        height: ParkRadarSizes.minimumTouchTarget,
+                      ),
+                      icon: Icon(
+                        state.showLegalLayer ? Icons.rule : Icons.rule_outlined,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopOverlay(ParkingMapState state, _MapLayerMode mode) {
+    return ParkMapOverlayShell(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (state.phase == ParkingMapPhase.guiding)
+            _buildNavigationHud(state)
+          else
+            ParkSearchShell(
+              controller: _searchController,
+              focusNode: _searchFocusNode,
+              onChanged: _controller.search,
+              onSubmitted: (_) {
+                if (state.suggestions.isNotEmpty) {
+                  unawaited(
+                    _controller.selectDestination(state.suggestions.first),
+                  );
+                  _searchFocusNode.unfocus();
+                }
+              },
+              onClear: () {
+                unawaited(_stopPositionTracking());
+                _controller.clearDestination();
+              },
+              isLoading: state.searching,
+              suggestions: state.suggestions.isEmpty
+                  ? null
+                  : _buildSuggestions(state.suggestions),
+            ),
+          if (state.notice != null) ...[
+            const SizedBox(height: ParkRadarSpacing.xs),
+            ParkStatusBanner(
+              title: _noticeTitle(state),
+              message: state.notice,
+              tone: _noticeTone(state),
+              actionLabel:
+                  state.destination != null &&
+                      (state.phase == ParkingMapPhase.failure ||
+                          state.streetStatus == DataLayerStatus.unavailable)
+                  ? 'Réessayer'
+                  : null,
+              onAction:
+                  state.destination != null &&
+                      (state.phase == ParkingMapPhase.failure ||
+                          state.streetStatus == DataLayerStatus.unavailable)
+                  ? () => unawaited(_controller.retryDestination())
+                  : null,
+              onDismiss: _controller.dismissNotice,
+            ),
+          ],
+          if (_tileUnavailable) ...[
+            const SizedBox(height: ParkRadarSpacing.xs),
+            ParkStatusBanner(
+              title: 'Fond de carte partiellement indisponible',
+              message: 'Les données ParkRadar restent visibles.',
+              tone: ParkStatusTone.warning,
+              onDismiss: () => setState(() => _tileUnavailable = false),
+            ),
+          ],
+          if (!_tileUnavailable &&
+              (state.notice == null || mode == _MapLayerMode.legal) &&
+              state.suggestions.isEmpty &&
+              state.scoredSegments.isNotEmpty) ...[
+            const SizedBox(height: ParkRadarSpacing.xs),
+            Align(alignment: Alignment.center, child: _buildLegend(mode)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSuggestions(List<GeocodingResult> suggestions) {
+    return ListView.separated(
+      shrinkWrap: true,
+      padding: EdgeInsets.zero,
+      itemCount: suggestions.length,
+      separatorBuilder: (_, _) => Divider(
+        height: 1,
+        color: Theme.of(context).colorScheme.outlineVariant,
+      ),
+      itemBuilder: (context, index) {
+        final suggestion = suggestions[index];
+        final label = _structuredAddress(suggestion.displayName);
+        return ListTile(
+          minTileHeight: ParkRadarSizes.minimumTouchTarget,
+          leading: const Icon(Icons.location_on_outlined),
+          title: Text(
+            label.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: label.subtitle.isEmpty
+              ? null
+              : Text(
+                  label.subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+          onTap: () {
+            _searchFocusNode.unfocus();
+            unawaited(_controller.selectDestination(suggestion));
+          },
+        );
+      },
+    );
+  }
+
+  ({String title, String subtitle}) _structuredAddress(String displayName) {
+    final parts = displayName
+        .split(',')
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return (title: displayName, subtitle: '');
+    if (parts.length >= 2 && int.tryParse(parts.first) != null) {
+      return (
+        title: '${parts.first} ${parts[1]}',
+        subtitle: parts.skip(2).join(', '),
+      );
+    }
+    return (title: parts.first, subtitle: parts.skip(1).join(', '));
+  }
+
+  Widget _buildNavigationHud(ParkingMapState state) {
+    final route = state.route;
+    final step = route == null || route.steps.isEmpty
+        ? null
+        : route.steps[_guidanceStepIndex.clamp(0, route.steps.length - 1)];
+    final nextStep =
+        route != null &&
+            route.steps.isNotEmpty &&
+            _guidanceStepIndex + 1 < route.steps.length
+        ? route.steps[_guidanceStepIndex + 1]
+        : null;
+    final meters = step == null || state.userPosition == null
+        ? null
+        : _distance(state.userPosition!, step.location);
+    final colors = context.parkRadarColors;
+    final scheme = Theme.of(context).colorScheme;
+
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: step?.instruction ?? 'Suivez l’itinéraire',
+      child: Material(
+        color: scheme.surface,
+        elevation: 6,
+        borderRadius: ParkRadarRadii.card,
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.all(ParkRadarSpacing.sm),
+          child: Row(
+            children: [
+              ExcludeSemantics(
+                child: Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: colors.brand,
+                    borderRadius: ParkRadarRadii.control,
+                  ),
+                  child: Icon(
+                    _maneuverIcon(step?.maneuver),
+                    color: colors.onBrand,
+                    size: 30,
+                  ),
+                ),
+              ),
+              const SizedBox(width: ParkRadarSpacing.sm),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      meters == null
+                          ? 'Itinéraire en cours'
+                          : _formatDistance(meters),
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: colors.brand,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    Text(
+                      step?.instruction ?? 'Suivez l’itinéraire',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    if (nextStep != null)
+                      Text(
+                        'Puis : ${nextStep.instruction}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: _stopGuidance,
+                tooltip: 'Arrêter le guidage',
+                icon: const Icon(Icons.close),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLegend(_MapLayerMode mode) {
+    final colors = context.parkRadarColors;
+    final entries = switch (mode) {
+      _MapLayerMode.availability || _MapLayerMode.route => [
+        _LegendEntry(
+          'Faible',
+          colors.confidenceLow.foreground,
+          _LineKind.dashed,
+        ),
+        _LegendEntry(
+          'Modéré',
+          colors.confidenceMedium.foreground,
+          _LineKind.dotted,
+        ),
+        _LegendEntry(
+          'Favorable',
+          colors.confidenceHigh.foreground,
+          _LineKind.solid,
+        ),
+      ],
+      _MapLayerMode.legal => [
+        _LegendEntry('Payant', colors.brand, _LineKind.solid),
+        _LegendEntry('Gratuit', colors.success.foreground, _LineKind.dotted),
+        _LegendEntry(
+          'Résident',
+          colors.confidenceLow.foreground,
+          _LineKind.dashed,
+        ),
+        _LegendEntry('Réservé', colors.warning.foreground, _LineKind.dashed),
+        _LegendEntry('Interdit', colors.danger.foreground, _LineKind.dotted),
+      ],
+    };
+    return Material(
+      color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.95),
+      elevation: 2,
+      borderRadius: ParkRadarRadii.pill,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: ParkRadarSpacing.sm,
+          vertical: ParkRadarSpacing.xs,
+        ),
+        child: Wrap(
+          alignment: WrapAlignment.center,
+          spacing: ParkRadarSpacing.sm,
+          runSpacing: ParkRadarSpacing.xxs,
+          children: [
+            for (final entry in entries) _LegendItem(entry: entry),
+            if (mode == _MapLayerMode.legal)
+              Text(
+                'Touchez une ligne pour les détails',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResponsivePanel(ParkingMapState state) {
+    return ParkResponsiveMapPanel(
+      sideAlignment: Alignment.centerRight,
+      child: switch (state.phase) {
+        _
+            when state.parkedPosition != null &&
+                state.phase != ParkingMapPhase.guiding =>
+          _buildParkedPanel(state),
+        ParkingMapPhase.idle => _buildWelcomePanel(),
+        ParkingMapPhase.failure => _buildFailurePanel(state),
+        _ when state.destination != null && state.loop == null =>
+          _buildNoLoopPanel(state),
+        _ when state.loop != null => _buildLoopPanel(state),
+        _ => _buildWelcomePanel(),
+      },
+    );
+  }
+
+  Widget _buildParkedPanel(ParkingMapState state) {
+    final colors = context.parkRadarColors;
+    final parkedAt = state.parkedAt;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.local_parking, color: colors.success.foreground),
+            const SizedBox(width: ParkRadarSpacing.xs),
+            Expanded(
+              child: Text(
+                'Stationnement enregistré',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        Text(
+          parkedAt == null
+              ? 'ParkRadar garde cette session uniquement sur cet appareil.'
+              : 'Garé ${_formatParkedAt(parkedAt)}. Signalez votre départ '
+                    'seulement lorsque la place est réellement libre.',
+        ),
+        const SizedBox(height: ParkRadarSpacing.md),
+        FilledButton.icon(
+          onPressed: state.reporting ? null : _reportFreed,
+          icon: state.reporting
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.directions_car_filled_outlined),
+          label: const Text('Je libère ma place'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWelcomePanel() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.local_parking, color: context.parkRadarColors.brand),
+            const SizedBox(width: ParkRadarSpacing.xs),
+            Expanded(
+              child: Text(
+                'Trouvez une rue, pas une promesse',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        Text(
+          'Recherchez une destination à Paris. ParkRadar croise l’inventaire '
+          'des régimes avant de proposer une boucle. La signalisation sur '
+          'place prévaut toujours.',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFailurePanel(ParkingMapState state) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Analyse indisponible',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        const Text(
+          'Les rues ou l’inventaire des régimes n’ont pas pu être chargés. '
+          'Aucun guidage n’est proposé tant que ces données manquent.',
+        ),
+        const SizedBox(height: ParkRadarSpacing.md),
+        FilledButton.icon(
+          onPressed: state.destination == null
+              ? null
+              : () => unawaited(_controller.retryDestination()),
+          icon: const Icon(Icons.refresh),
+          label: const Text('Réessayer l’analyse'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNoLoopPanel(ParkingMapState state) {
+    final legalUnavailable = !state.hasVerifiedLegalCoverage;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          legalUnavailable
+              ? 'Inventaire des régimes indisponible'
+              : 'Aucune boucle recommandable trouvée',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        Text(
+          legalUnavailable
+              ? 'ParkRadar applique un garde-fou strict : sans inventaire '
+                    'Paris Data disponible, aucune rue n’est recommandée.'
+              : 'Les rues compatibles autour de cette destination ne donnent '
+                    'pas un signal suffisant. Élargissez la recherche ou '
+                    'réessayez plus tard.',
+        ),
+        const SizedBox(height: ParkRadarSpacing.sm),
+        _legalSummary(state),
+        const SizedBox(height: ParkRadarSpacing.md),
+        FilledButton.icon(
+          onPressed: () => unawaited(_controller.retryDestination()),
+          icon: const Icon(Icons.refresh),
+          label: const Text('Actualiser les données'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLoopPanel(ParkingMapState state) {
+    final loop = state.loop!;
+    final ranked = [...loop.orderedSegments]
+      ..sort((a, b) => b.probabilityFree.compareTo(a.probabilityFree));
+    final best = ranked.first;
+    final route = state.route;
+    final routeMinutes = route == null
+        ? null
+        : (route.durationSeconds / 60).ceil().clamp(1, 999);
+    final loopSummary = routeMinutes == null
+        ? '${loop.orderedSegments.length} zones à parcourir'
+        : 'boucle routée d’environ $routeMinutes min';
+    final guiding = state.phase == ParkingMapPhase.guiding;
+    final preview = state.phase == ParkingMapPhase.preview;
+    final canRoute = state.canStartGuidance;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    guiding
+                        ? 'Recherche guidée en cours'
+                        : _availabilityLabel(best.probabilityFree),
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: ParkRadarSpacing.xxs),
+                  Text(
+                    'Visez ${best.segment.name} · $loopSummary',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ],
+              ),
+            ),
+            if (!guiding)
+              IconButton(
+                onPressed: _pickArrivalHour,
+                tooltip: 'Changer l’heure d’arrivée',
+                icon: const Icon(Icons.schedule),
+              ),
+          ],
+        ),
+        const SizedBox(height: ParkRadarSpacing.sm),
+        Wrap(
+          spacing: ParkRadarSpacing.xs,
+          runSpacing: ParkRadarSpacing.xs,
+          children: [
+            _predictionConfidenceChip(state),
+            _predictionFreshnessChip(state),
+          ],
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        Text(
+          _predictionAuditLabel(state),
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+        Text(
+          _communityFreshnessLabel(state),
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+        const SizedBox(height: ParkRadarSpacing.sm),
+        _legalSummary(state),
+        if (!guiding) ...[
+          const SizedBox(height: ParkRadarSpacing.sm),
+          _arrivalControl(state),
+        ],
+        if (route != null) ...[
+          const SizedBox(height: ParkRadarSpacing.sm),
+          _routeSummary(route, preview: preview, guiding: guiding),
+        ],
+        const SizedBox(height: ParkRadarSpacing.md),
+        if (guiding) ...[
+          FilledButton.icon(
+            onPressed: state.reporting ? null : _reportParked,
+            icon: state.reporting
+                ? SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  )
+                : const Icon(Icons.local_parking),
+            label: const Text('Place trouvée'),
+          ),
+          TextButton.icon(
+            onPressed: _stopGuidance,
+            icon: const Icon(Icons.stop_circle_outlined),
+            label: const Text('Arrêter le guidage'),
+          ),
+        ] else if (preview) ...[
+          FilledButton.icon(
+            onPressed: canRoute && !state.routing ? _startGuidance : null,
+            icon: state.routing
+                ? SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  )
+                : const Icon(Icons.gps_fixed),
+            label: const Text('Démarrer avec le GPS'),
+          ),
+          TextButton(
+            onPressed: _controller.stopGuidance,
+            child: const Text('Fermer l’aperçu'),
+          ),
+        ] else
+          FilledButton.icon(
+            onPressed: canRoute && !state.routing ? _previewRoute : null,
+            icon: state.routing
+                ? SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  )
+                : const Icon(Icons.alt_route),
+            label: const Text('Prévisualiser la boucle'),
+          ),
+        if (!state.hasVerifiedLegalCoverage && !guiding) ...[
+          const SizedBox(height: ParkRadarSpacing.xs),
+          Text(
+            'Guidage désactivé tant que l’inventaire des régimes n’est pas disponible.',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _predictionConfidenceChip(ParkingMapState state) {
+    final confidence = state.predictionConfidence;
+    final level = switch (confidence) {
+      AvailabilityConfidence.veryLow ||
+      AvailabilityConfidence.low => ParkConfidenceLevel.low,
+      AvailabilityConfidence.medium => ParkConfidenceLevel.medium,
+      AvailabilityConfidence.high => ParkConfidenceLevel.high,
+      null => ParkConfidenceLevel.unknown,
+    };
+    final estimates = state.availabilityEstimates.values;
+    final supervisedCount = estimates.isEmpty
+        ? 0
+        : estimates
+              .map((estimate) => estimate.supervisedObservationCount)
+              .reduce((a, b) => a < b ? a : b);
+    final calibration = state.predictionVersions?.calibration ?? '';
+    final calibrationLabel = calibration.toLowerCase().contains('uncalibrated')
+        ? 'non calibré'
+        : calibration.isEmpty
+        ? 'calibration inconnue'
+        : 'calibré';
+    return ParkConfidenceChip(
+      level: level,
+      detail:
+          '$calibrationLabel · $supervisedCount observation${supervisedCount > 1 ? 's' : ''} terrain',
+    );
+  }
+
+  Widget _predictionFreshnessChip(ParkingMapState state) {
+    final freshness = state.predictionFreshnessAt(DateTime.now());
+    final level = switch (freshness) {
+      AvailabilityFreshness.live => ParkFreshnessLevel.live,
+      AvailabilityFreshness.recent => ParkFreshnessLevel.fresh,
+      AvailabilityFreshness.stale ||
+      AvailabilityFreshness.expired => ParkFreshnessLevel.stale,
+      null => ParkFreshnessLevel.unavailable,
+    };
+    final age = state.legalDataAgeAt(DateTime.now());
+    final coverage = (state.legalDataTimestampCoverage * 100).round();
+    final detail = age == null
+        ? state.parisSpots.isEmpty
+              ? 'source métier absente'
+              : 'date source incomplète · $coverage % horodaté'
+        : 'source métier ${_formatDataAge(age)}';
+    return ParkFreshnessChip(level: level, detail: detail);
+  }
+
+  String _predictionAuditLabel(ParkingMapState state) {
+    final versions = state.predictionVersions;
+    if (versions == null) return 'Prédiction non disponible et non versionnée.';
+    return 'Modèle ${versions.model} · données ${versions.data} · '
+        'calibration ${versions.calibration}';
+  }
+
+  String _communityFreshnessLabel(ParkingMapState state) {
+    if (!state.isNow) {
+      return 'Communauté : non appliquée à une arrivée future.';
+    }
+    final updatedAt = state.communityUpdatedAt;
+    return switch (state.communityStatus) {
+      DataLayerStatus.fresh when updatedAt != null =>
+        'Communauté : relevée il y a '
+            '${_formatAge(DateTime.now().difference(updatedAt))}.',
+      DataLayerStatus.loading => 'Communauté : mise à jour en cours.',
+      DataLayerStatus.stale =>
+        'Communauté : dernière mise à jour échouée, ancien signal ignoré.',
+      _ => 'Communauté : aucun signal récent disponible.',
+    };
+  }
+
+  Widget _legalSummary(ParkingMapState state) {
+    final colors = context.parkRadarColors;
+    final available = state.hasVerifiedLegalCoverage;
+    final stale = available && state.legalStatus == DataLayerStatus.stale;
+    final eligible = state.eligibility.values
+        .where((item) => item.status == EligibilityStatus.eligible)
+        .length;
+    final regimes = state.parisSpots.map((spot) => spot.regime.label).toSet();
+    final regimeText = regimes.take(5).join(', ');
+    final age = state.legalDataAgeAt(DateTime.now());
+    final timestampCoverage = (state.legalDataTimestampCoverage * 100).round();
+    final tone = !available
+        ? colors.danger
+        : stale
+        ? colors.warning
+        : colors.success;
+    final statusText = !available
+        ? 'Inventaire des régimes indisponible : recommandations bloquées'
+        : stale
+        ? 'Inventaire Paris chargé mais ancien'
+              '${age == null ? ' · date source incomplète ($timestampCoverage % horodaté)' : ' · source ${_formatDataAge(age)}'}'
+              ' · $eligible zone${eligible > 1 ? 's' : ''} compatible${eligible > 1 ? 's' : ''}'
+              '${regimeText.isEmpty ? '' : '\nRégimes présents : $regimeText'}'
+              '\nLa signalisation sur place prévaut.'
+        : 'Inventaire Paris chargé · $eligible zone${eligible > 1 ? 's' : ''} '
+              'jugée${eligible > 1 ? 's' : ''} compatible${eligible > 1 ? 's' : ''}'
+              '${age == null ? '' : ' · source ${_formatDataAge(age)}'}'
+              '${regimeText.isEmpty ? '' : '\nRégimes présents : $regimeText'}';
+    return Semantics(
+      label: !available
+          ? 'Inventaire des régimes Paris indisponible'
+          : stale
+          ? 'Inventaire des régimes Paris chargé mais ancien, $eligible zones compatibles, la signalisation sur place prévaut'
+          : 'Inventaire des régimes Paris chargé, $eligible zones jugées compatibles',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: tone.background,
+          border: Border.all(color: tone.border),
+          borderRadius: ParkRadarRadii.control,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(ParkRadarSpacing.sm),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                !available
+                    ? Icons.gpp_bad_outlined
+                    : stale
+                    ? Icons.history_toggle_off
+                    : Icons.verified_outlined,
+                color: tone.foreground,
+                size: ParkRadarSizes.compactIcon,
+              ),
+              const SizedBox(width: ParkRadarSpacing.xs),
+              Expanded(
+                child: Text(
+                  statusText,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: tone.foreground),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _arrivalControl(ParkingMapState state) {
+    return Row(
+      children: [
+        const Icon(Icons.schedule, size: ParkRadarSizes.compactIcon),
+        const SizedBox(width: ParkRadarSpacing.xs),
+        Expanded(
+          child: Text(
+            state.plannedArrival == null
+                ? 'Arrivée : maintenant'
+                : 'Arrivée : ${_formatArrival(state.plannedArrival!)}',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
+        TextButton(onPressed: _pickArrivalHour, child: const Text('Modifier')),
+        if (state.plannedArrival != null)
+          IconButton(
+            onPressed: () => _controller.setArrivalHour(null),
+            tooltip: 'Revenir à maintenant',
+            icon: const Icon(Icons.restart_alt),
+          ),
+      ],
+    );
+  }
+
+  Widget _routeSummary(
+    DrivingRoute route, {
+    required bool preview,
+    required bool guiding,
+  }) {
+    final firstInstruction = route.steps.isEmpty
+        ? null
+        : route.steps.first.instruction;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Icon(Icons.map_outlined, size: 18, color: Colors.black54),
-        const SizedBox(width: 6),
+        Icon(
+          guiding ? Icons.navigation : Icons.route_outlined,
+          size: ParkRadarSizes.compactIcon,
+          color: context.parkRadarColors.route,
+        ),
+        const SizedBox(width: ParkRadarSpacing.xs),
         Expanded(
-          child: Wrap(
-            spacing: 10,
-            runSpacing: 2,
-            children: [
-              for (final e in top)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        color: _regimeColor(e.key),
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${e.key.label} ${(e.value / total * 100).round()}%',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-            ],
+          child: Text(
+            '${preview ? 'Aperçu' : 'Itinéraire'} · '
+            '${_formatDistance(route.distanceMeters)} · '
+            '${_formatDuration(route.durationSeconds)}'
+            '${firstInstruction == null ? '' : '\n$firstInstruction'}',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildLoopPanel(SearchLoop loop) {
-    final minutes = _planner.expectedSearchMinutes(loop);
-    // Chiffre honnête : la probabilité de la MEILLEURE rue (une chance réelle
-    // sur une rue), pas le cumul gonflé qui atteint vite 100 %.
-    final ranked = [...loop.orderedSegments]
-      ..sort((a, b) => b.probabilityFree.compareTo(a.probabilityFree));
-    final best = ranked.isEmpty ? null : ranked.first;
-    final bestPct = best == null ? 0 : (best.probabilityFree * 100).round();
-    final qual = _qualitative(loop.cumulativeProbability);
+  _MapLayerMode _layerMode(ParkingMapState state) {
+    if (state.phase == ParkingMapPhase.guiding ||
+        state.phase == ParkingMapPhase.preview) {
+      return _MapLayerMode.route;
+    }
+    if (state.showLegalLayer) return _MapLayerMode.legal;
+    return _MapLayerMode.availability;
+  }
 
-    return Card(
-      margin: const EdgeInsets.all(12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor:
-                      best == null ? Colors.grey : _probColor(best.probabilityFree),
-                  child: Text('$bestPct%',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(qual.icon, size: 18, color: Colors.black54),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              '${qual.label} en parcourant '
-                              '${loop.orderedSegments.length} rue'
-                              '${loop.orderedSegments.length > 1 ? 's' : ''}',
-                              style: Theme.of(context).textTheme.bodyMedium,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        best == null
-                            ? 'Recherche estimée : ~${minutes.ceil()} min'
-                            : 'Visez ${best.segment.name} · recherche ~${minutes.ceil()} min',
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            if (_parisSpots.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              _regimeSummary(),
-            ],
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                const Icon(Icons.schedule, size: 18),
-                const SizedBox(width: 6),
-                Text(_simulatedHour == null
-                    ? 'Maintenant'
-                    : 'Arrivée à ${_simulatedHour}h'),
-                Expanded(
-                  child: Slider(
-                    min: 0,
-                    max: 23,
-                    divisions: 23,
-                    value: (_simulatedHour ?? DateTime.now().hour).toDouble(),
-                    onChanged: (v) {
-                      _simulatedHour = v.round();
-                      _recompute();
-                    },
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Revenir à maintenant',
-                  icon: const Icon(Icons.restart_alt, size: 20),
-                  onPressed: _simulatedHour == null
-                      ? null
-                      : () {
-                          _simulatedHour = null;
-                          _recompute();
-                        },
-                ),
-              ],
-            ),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _loadingRoute ? null : _startGuidance,
-                icon: _loadingRoute
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white),
-                      )
-                    : const Icon(Icons.navigation),
-                label: Text(_route == null
-                    ? 'Lancer le guidage vers la boucle'
-                    : 'Recalculer l’itinéraire'),
-              ),
-            ),
-            if (_community.isEnabled) ...[
-              const SizedBox(height: 4),
-              Row(
+  _AvailabilityLevel _availabilityLevel(double value) {
+    if (value < 0.33) return _AvailabilityLevel.low;
+    if (value < 0.66) return _AvailabilityLevel.medium;
+    return _AvailabilityLevel.high;
+  }
+
+  String _availabilityLabel(double value) {
+    return switch (_availabilityLevel(value)) {
+      _AvailabilityLevel.low => 'Signal estimé faible',
+      _AvailabilityLevel.medium => 'Signal estimé modéré',
+      _AvailabilityLevel.high => 'Signal estimé favorable',
+    };
+  }
+
+  String _noticeTitle(ParkingMapState state) {
+    if (state.phase == ParkingMapPhase.failure ||
+        state.streetStatus == DataLayerStatus.unavailable) {
+      return 'Analyse indisponible';
+    }
+    if (state.legalStatus == DataLayerStatus.unavailable ||
+        state.legalStatus == DataLayerStatus.unsupported) {
+      return 'Couverture réglementaire insuffisante';
+    }
+    return 'Information ParkRadar';
+  }
+
+  ParkStatusTone _noticeTone(ParkingMapState state) {
+    if (state.phase == ParkingMapPhase.failure ||
+        state.streetStatus == DataLayerStatus.unavailable) {
+      return ParkStatusTone.error;
+    }
+    if (state.legalStatus == DataLayerStatus.unavailable ||
+        state.legalStatus == DataLayerStatus.unsupported) {
+      return ParkStatusTone.warning;
+    }
+    return ParkStatusTone.info;
+  }
+
+  IconData _maneuverIcon(String? maneuver) {
+    if (maneuver == null) return Icons.navigation;
+    if (maneuver.contains('uturn')) return Icons.u_turn_left;
+    if (maneuver.contains('left')) return Icons.turn_left;
+    if (maneuver.contains('right')) return Icons.turn_right;
+    if (maneuver.startsWith('arrive')) return Icons.flag;
+    if (maneuver.contains('roundabout') || maneuver.contains('rotary')) {
+      return Icons.roundabout_right;
+    }
+    return Icons.straight;
+  }
+
+  String _formatArrival(DateTime arrival) {
+    final now = atParis(DateTime.now());
+    final parisArrival = atParis(arrival);
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(
+      parisArrival.year,
+      parisArrival.month,
+      parisArrival.day,
+    );
+    final prefix = day == today
+        ? 'aujourd’hui'
+        : day == today.add(const Duration(days: 1))
+        ? 'demain'
+        : '${parisArrival.day.toString().padLeft(2, '0')}/'
+              '${parisArrival.month.toString().padLeft(2, '0')}';
+    return '$prefix à ${parisArrival.hour.toString().padLeft(2, '0')} h';
+  }
+
+  String _formatParkedAt(DateTime parkedAt) {
+    final age = DateTime.now().difference(parkedAt);
+    if (!age.isNegative && age < const Duration(hours: 24)) {
+      return 'il y a ${_formatAge(age)}';
+    }
+    final parisParkedAt = atParis(parkedAt);
+    return 'le ${parisParkedAt.day.toString().padLeft(2, '0')}/'
+        '${parisParkedAt.month.toString().padLeft(2, '0')} à '
+        '${parisParkedAt.hour.toString().padLeft(2, '0')}:'
+        '${parisParkedAt.minute.toString().padLeft(2, '0')}';
+  }
+
+  String _formatSourceDate(DateTime value) {
+    final parisDate = atParis(value);
+    return 'le ${parisDate.day.toString().padLeft(2, '0')}/'
+        '${parisDate.month.toString().padLeft(2, '0')}/${parisDate.year}';
+  }
+
+  String _formatDataAge(Duration age) {
+    final safeAge = age.isNegative ? Duration.zero : age;
+    if (safeAge.inDays >= 730) return 'il y a ${safeAge.inDays ~/ 365} ans';
+    if (safeAge.inDays >= 365) return 'il y a 1 an';
+    if (safeAge.inDays >= 2) return 'il y a ${safeAge.inDays} jours';
+    return 'il y a ${_formatAge(safeAge)}';
+  }
+
+  String _formatAge(Duration age) {
+    final safeAge = age.isNegative ? Duration.zero : age;
+    if (safeAge.inSeconds < 60) return '${safeAge.inSeconds} s';
+    if (safeAge.inMinutes < 60) return '${safeAge.inMinutes} min';
+    return '${safeAge.inHours} h';
+  }
+
+  String _formatDistance(num meters) {
+    if (meters < 1000) return '${meters.round()} m';
+    return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+
+  String _formatDuration(double seconds) {
+    final minutes = (seconds / 60).ceil();
+    if (minutes < 60) return '$minutes min';
+    final hours = minutes ~/ 60;
+    final rest = minutes % 60;
+    return rest == 0 ? '$hours h' : '$hours h $rest';
+  }
+}
+
+enum _MapLayerMode { availability, legal, route }
+
+enum _AvailabilityLevel { low, medium, high }
+
+enum _LineKind { solid, dashed, dotted }
+
+class _MapLoadingCard extends StatelessWidget {
+  const _MapLoadingCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: 'Analyse des rues et de l’inventaire des régimes en cours',
+        child: ExcludeSemantics(
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(ParkRadarSpacing.lg),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed:
-                          _reporting ? null : () => _reportEvent('parked'),
-                      icon: const Icon(Icons.local_parking, size: 18),
-                      label: const Text('Je me gare'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed:
-                          _reporting ? null : () => _reportEvent('freed'),
-                      icon: const Icon(Icons.time_to_leave, size: 18),
-                      label: const Text('Je libère'),
-                    ),
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: ParkRadarSpacing.sm),
+                  Text(
+                    'Analyse des rues et des régimes…',
+                    style: Theme.of(context).textTheme.bodyMedium,
                   ),
                 ],
               ),
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      _community.isRemote ? Icons.groups : Icons.phone_android,
-                      size: 13,
-                      color: Colors.black45,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MapAttribution extends StatelessWidget {
+  const _MapAttribution({
+    required this.alignment,
+    required this.label,
+    required this.onTap,
+  });
+
+  final Alignment alignment;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Align(
+        alignment: alignment,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 320),
+          child: Material(
+            color: Theme.of(
+              context,
+            ).colorScheme.surface.withValues(alpha: 0.92),
+            borderRadius: ParkRadarRadii.control,
+            clipBehavior: Clip.antiAlias,
+            child: Semantics(
+              button: true,
+              label: 'Informations et licences cartographiques',
+              child: InkWell(
+                onTap: onTap,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minHeight: ParkRadarSizes.minimumTouchTarget,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: ParkRadarSpacing.xs,
+                      vertical: ParkRadarSpacing.xxs,
                     ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _community.isRemote
-                          ? 'En direct avec la communauté'
-                          : 'Mode démo (signalements sur cet appareil)',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(color: Colors.black45),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        label,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
                     ),
-                  ],
+                  ),
                 ),
               ),
-            ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LegendEntry {
+  const _LegendEntry(this.label, this.color, this.kind);
+
+  final String label;
+  final Color color;
+  final _LineKind kind;
+}
+
+class _LegendItem extends StatelessWidget {
+  const _LegendItem({required this.entry});
+
+  final _LegendEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: entry.label,
+      child: ExcludeSemantics(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 28,
+              height: 12,
+              child: CustomPaint(
+                painter: _LineSwatchPainter(
+                  color: entry.color,
+                  kind: entry.kind,
+                ),
+              ),
+            ),
+            const SizedBox(width: ParkRadarSpacing.xxs),
+            Text(entry.label, style: Theme.of(context).textTheme.labelSmall),
           ],
         ),
       ),
     );
+  }
+}
+
+class _LineSwatchPainter extends CustomPainter {
+  const _LineSwatchPainter({required this.color, required this.kind});
+
+  final Color color;
+  final _LineKind kind;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    final y = size.height / 2;
+    switch (kind) {
+      case _LineKind.solid:
+        canvas.drawLine(Offset(1, y), Offset(size.width - 1, y), paint);
+      case _LineKind.dashed:
+        for (var x = 1.0; x < size.width; x += 10) {
+          canvas.drawLine(
+            Offset(x, y),
+            Offset((x + 5).clamp(0, size.width), y),
+            paint,
+          );
+        }
+      case _LineKind.dotted:
+        for (var x = 2.0; x < size.width; x += 7) {
+          canvas.drawCircle(Offset(x, y), 2, paint);
+        }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LineSwatchPainter oldDelegate) {
+    return color != oldDelegate.color || kind != oldDelegate.kind;
   }
 }

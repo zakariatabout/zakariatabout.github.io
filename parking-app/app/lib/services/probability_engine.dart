@@ -1,19 +1,27 @@
 import 'dart:math' as math;
 
+import '../models/availability_estimate.dart';
 import '../models/street_segment.dart';
+import 'probability_calibrator.dart';
 
 /// Moteur heuristique d'estimation de la probabilité de place libre.
 ///
-/// Modèle : pour un tronçon de capacité `c` et un taux d'occupation `rho`,
-/// P(au moins une place libre) = 1 - rho^c.
-///
-/// Le taux d'occupation est estimé à partir de profils horaires par type de
-/// rue (résidentiel / mixte / commerçant), calibrés sur les courbes types de
-/// la littérature (SFpark, Melbourne). Ce moteur est volontairement
-/// déterministe et sans réseau : il constitue le "prior" qui sera plus tard
-/// affiné par l'historique réel et les signalements temps réel.
+/// Ce moteur déterministe constitue un prior explicite, et non une vérité
+/// terrain. Il conserve l'API historique [score], mais [estimateAvailability]
+/// expose aussi l'incertitude, la fraîcheur et les versions nécessaires pour
+/// auditer la prédiction.
 class ProbabilityEngine {
-  const ProbabilityEngine();
+  const ProbabilityEngine({
+    this.calibrator = const IdentityProbabilityCalibrator(),
+  });
+
+  /// Étape de calibration injectable. Par défaut, l'identité signale
+  /// explicitement qu'aucune calibration supervisée n'est disponible.
+  final ProbabilityCalibrator calibrator;
+
+  static const String modelVersion = 'heuristic-diminishing-v2';
+  static const String defaultDataVersion = 'paris-inventory-hourly-prior-v2';
+  static const Duration defaultValidity = Duration(minutes: 15);
 
   /// Longueur moyenne d'une place en créneau (m).
   static const double meterPerSpot = 5.5;
@@ -22,11 +30,12 @@ class ProbabilityEngine {
   /// (entrées charretières, intersections, passages piétons...).
   static const double usableFraction = 0.65;
 
-  /// Facteur de « trouvabilité » : en pratique, une seule place théoriquement
-  /// libre ne suffit pas (on la rate, elle est mal placée, occupée à l'arrivée…).
-  /// On divise la capacité effective par ce facteur : le modèle devient plus
-  /// conservateur et surtout plus sensible à l'heure (évite la saturation à
-  /// ~100 % qui rendait le curseur d'heure sans effet).
+  /// Échelle de rendement décroissant de la capacité.
+  ///
+  /// Une longue géométrie sans capacité déclarée ne représente pas autant d'occasions
+  /// indépendantes qu'elle contient de places théoriques : interdictions
+  /// locales, rotation et arrivée future sont corrélées. Cette échelle évite
+  /// donc que les longs tronçons saturent artificiellement près de 100 %.
   static const double findabilityFactor = 2.5;
 
   /// Profil d'occupation par heure (0-23) pour une rue résidentielle :
@@ -47,12 +56,17 @@ class ProbabilityEngine {
   /// Estime la capacité de stationnement d'un tronçon.
   int estimateCapacity(StreetSegment s) {
     if (s.parkingForbidden) return 0;
+    if (s.knownCapacity != null) return math.max(0, s.knownCapacity!);
 
-    // Nombre de côtés stationnables : explicite via les tags OSM sinon
+    // Pour les seuls segments sans capacité déclarée : nombre de côtés
+    // stationnables explicite via les tags OSM, sinon
     // heuristique (double sens résidentiel = souvent 2 côtés, sens unique
     // ou axe important = 1 côté).
-    final sides = s.parkingSides ??
-        ((s.isOneWay || s.highwayType == 'secondary' || s.highwayType == 'primary')
+    final sides =
+        s.parkingSides ??
+        ((s.isOneWay ||
+                s.highwayType == 'secondary' ||
+                s.highwayType == 'primary')
             ? 1
             : 2);
     if (sides == 0) return 0;
@@ -86,24 +100,136 @@ class ProbabilityEngine {
     return occ.clamp(0.05, 0.995);
   }
 
+  /// Nombre d'occasions indépendantes retenu par le prior.
+  ///
+  /// Il croît avec la capacité, mais de manière logarithmique. C'est une
+  /// hypothèse conservatrice et monotone, destinée à être remplacée ou
+  /// réajustée dès que des labels locaux représentatifs sont disponibles.
+  double effectiveOpportunityCount(int capacity) {
+    if (capacity <= 0) return 0;
+    return 1.0 + math.log(1.0 + (capacity - 1) / findabilityFactor);
+  }
+
+  /// Probabilité brute avant calibration.
+  ///
+  /// Cette méthode publique rend la fonction déterministe directement
+  /// testable. La valeur finale destinée au produit reste celle de
+  /// [estimateAvailability], qui applique la calibration et les garde-fous.
+  double estimateRawAvailability({
+    required int capacity,
+    required num occupancy,
+  }) {
+    if (capacity <= 0) return 0;
+    final boundedOccupancy = ProbabilityBounds.clamp(occupancy);
+    final effectiveOpportunities = effectiveOpportunityCount(capacity);
+    final probability =
+        1.0 - math.pow(boundedOccupancy, effectiveOpportunities).toDouble();
+    return ProbabilityBounds.clamp(probability);
+  }
+
+  /// Produit une estimation bornée, versionnée et accompagnée d'incertitude.
+  ///
+  /// [dataAsOf] doit être renseigné par l'appelant quand les tronçons viennent
+  /// d'un cache. À défaut, le moteur suppose qu'ils viennent d'être acquis.
+  AvailabilityEstimate estimateAvailability(
+    StreetSegment segment,
+    DateTime when, {
+    DateTime? generatedAt,
+    DateTime? dataAsOf,
+    Duration validFor = defaultValidity,
+    String dataVersion = defaultDataVersion,
+  }) {
+    final producedAt = (generatedAt ?? DateTime.now()).toUtc();
+    final sourceAsOf = (dataAsOf ?? producedAt).toUtc();
+    final capacity = estimateCapacity(segment);
+    final occupancy = estimateOccupancy(segment, when);
+    final rawProbability = estimateRawAvailability(
+      capacity: capacity,
+      occupancy: occupancy,
+    );
+    final calibrated = calibrator.calibrate(rawProbability);
+    // Une calibration globale ne peut pas rendre disponible un tronçon où
+    // aucun emplacement compatible n'est estimé.
+    final probability = capacity == 0 ? 0.0 : calibrated.probability;
+    final confidence = _confidenceFor(
+      segment,
+      calibrated.supervisedObservationCount,
+    );
+    final halfWidth = _intervalHalfWidth(confidence);
+
+    return AvailabilityEstimate(
+      probability: probability,
+      interval: ProbabilityInterval(
+        lower: probability - halfWidth,
+        upper: probability + halfWidth,
+      ),
+      confidence: confidence,
+      predictionFor: when,
+      generatedAt: producedAt,
+      dataAsOf: sourceAsOf,
+      validFor: validFor,
+      versions: PredictionVersions(
+        model: modelVersion,
+        data: dataVersion,
+        calibration: calibrated.version,
+      ),
+      supervisedObservationCount: calibrated.supervisedObservationCount,
+    );
+  }
+
   /// Évalue un tronçon : capacité, occupation et probabilité de place libre.
   ScoredSegment score(StreetSegment s, DateTime when) {
     final capacity = estimateCapacity(s);
     final occupancy = estimateOccupancy(s, when);
-    // P(place trouvable) = 1 - occupation^(capacité effective).
-    final effectiveCapacity = capacity / findabilityFactor;
-    final pFree = capacity == 0
-        ? 0.0
-        : 1.0 - math.pow(occupancy, effectiveCapacity).toDouble();
+    final rawProbability = estimateRawAvailability(
+      capacity: capacity,
+      occupancy: occupancy,
+    );
+    final calibrated = calibrator.calibrate(rawProbability);
+    final probability = capacity == 0 ? 0.0 : calibrated.probability;
     return ScoredSegment(
       segment: s,
       capacity: capacity,
       occupancy: occupancy,
-      probabilityFree: pFree.clamp(0.0, 1.0),
+      probabilityFree: ProbabilityBounds.clamp(
+        probability,
+        maximum: calibrated.supervisedObservationCount > 0
+            ? 1.0
+            : AvailabilityEstimate.maxUnsupervisedProbability,
+      ),
     );
   }
 
-  List<ScoredSegment> scoreAll(Iterable<StreetSegment> segments, DateTime when) {
+  List<ScoredSegment> scoreAll(
+    Iterable<StreetSegment> segments,
+    DateTime when,
+  ) {
     return [for (final s in segments) score(s, when)];
+  }
+
+  AvailabilityConfidence _confidenceFor(
+    StreetSegment segment,
+    int supervisedObservationCount,
+  ) {
+    if (supervisedObservationCount == 0) {
+      return segment.parkingSides == null
+          ? AvailabilityConfidence.veryLow
+          : AvailabilityConfidence.low;
+    }
+    if (supervisedObservationCount < 500) {
+      return AvailabilityConfidence.low;
+    }
+    // Une calibration globale, même bien alimentée, ne suffit pas à déclarer
+    // une confiance haute sans observations récentes au niveau du tronçon.
+    return AvailabilityConfidence.medium;
+  }
+
+  double _intervalHalfWidth(AvailabilityConfidence confidence) {
+    return switch (confidence) {
+      AvailabilityConfidence.veryLow => 0.30,
+      AvailabilityConfidence.low => 0.22,
+      AvailabilityConfidence.medium => 0.14,
+      AvailabilityConfidence.high => 0.08,
+    };
   }
 }

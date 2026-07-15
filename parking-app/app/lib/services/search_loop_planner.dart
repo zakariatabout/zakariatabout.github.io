@@ -5,14 +5,23 @@ import 'package:latlong2/latlong.dart';
 import '../models/street_segment.dart';
 
 class SearchLoop {
-  SearchLoop({required this.orderedSegments, required this.cumulativeProbability});
+  SearchLoop({
+    required this.orderedSegments,
+    required this.cumulativeProbability,
+    this.isCalibrated = false,
+  });
 
   /// Tronçons à parcourir, dans l'ordre conseillé.
   final List<ScoredSegment> orderedSegments;
 
-  /// Probabilité de trouver au moins une place en parcourant toute la boucle :
-  /// 1 - produit(1 - p_i).
+  /// Estimation prudente du succès de la stratégie.
+  ///
+  /// Les rues proches ne sont pas considérées comme indépendantes : la
+  /// contribution des rues supplémentaires est décotée selon leur proximité.
+  /// Tant qu'aucun modèle terrain n'est chargé, [isCalibrated] reste faux et
+  /// l'UI ne doit pas afficher cette valeur comme un pourcentage certain.
   final double cumulativeProbability;
+  final bool isCalibrated;
 }
 
 /// Construit la boucle de recherche : la séquence de rues qui maximise les
@@ -20,7 +29,7 @@ class SearchLoop {
 class SearchLoopPlanner {
   const SearchLoopPlanner({
     this.targetProbability = 0.90,
-    this.maxSegments = 8,
+    this.maxSegments = 6,
     this.maxWalkMeters = 500,
   });
 
@@ -45,20 +54,26 @@ class SearchLoopPlanner {
 
   SearchLoop plan(List<ScoredSegment> scored, LatLng destination) {
     // Candidats triés par attractivité.
-    final candidates = scored
-        .where((s) => s.probabilityFree > 0.01)
-        .map((s) => (seg: s, score: attractiveness(s, destination)))
-        .where((c) => c.score > 0)
-        .toList()
-      ..sort((a, b) => b.score.compareTo(a.score));
+    final candidates =
+        scored
+            .where((s) => s.probabilityFree > 0.01)
+            .map((s) => (seg: s, score: attractiveness(s, destination)))
+            .where((c) => c.score > 0)
+            .toList()
+          ..sort((a, b) => b.score.compareTo(a.score));
 
-    // Sélection gloutonne jusqu'au seuil de probabilité cumulée.
+    // Sélection gloutonne avec décote de corrélation spatiale. Deux rues
+    // voisines partagent souvent la même pression de stationnement ; les
+    // traiter comme deux essais indépendants gonfle fortement le score.
     final selected = <ScoredSegment>[];
-    var failAll = 1.0; // produit des (1 - p_i)
+    var failAll = 1.0;
     for (final c in candidates) {
       if (selected.length >= maxSegments) break;
       selected.add(c.seg);
-      failAll *= 1.0 - c.seg.probabilityFree;
+      final incremental =
+          c.seg.probabilityFree *
+          _correlationDiscount(c.seg, selected.take(selected.length - 1));
+      failAll *= 1.0 - incremental.clamp(0.0, 0.95);
       if (1.0 - failAll >= targetProbability) break;
     }
 
@@ -69,7 +84,26 @@ class SearchLoopPlanner {
     return SearchLoop(
       orderedSegments: ordered,
       cumulativeProbability: 1.0 - failAll,
+      isCalibrated: false,
     );
+  }
+
+  double _correlationDiscount(
+    ScoredSegment candidate,
+    Iterable<ScoredSegment> alreadySelected,
+  ) {
+    if (alreadySelected.isEmpty) return 1.0;
+    var nearest = double.infinity;
+    for (final selected in alreadySelected) {
+      nearest = math.min(
+        nearest,
+        _distance(candidate.segment.midpoint, selected.segment.midpoint),
+      );
+    }
+    if (nearest < 75) return 0.25;
+    if (nearest < 150) return 0.40;
+    if (nearest < 300) return 0.65;
+    return 0.85;
   }
 
   List<ScoredSegment> _nearestNeighborOrder(
@@ -102,17 +136,22 @@ class SearchLoopPlanner {
   /// Temps de recherche espéré (minutes) le long de la boucle, en supposant
   /// ~20 km/h de vitesse de croisière en recherche.
   double expectedSearchMinutes(SearchLoop loop) {
-    const cruiseSpeedMs = 20 * 1000 / 3600;
+    const cruiseSpeedMs = 15 * 1000 / 3600;
     var expected = 0.0;
     var probStillSearching = 1.0;
     var elapsed = 0.0;
+    LatLng? previous;
     for (final s in loop.orderedSegments) {
-      final t = s.segment.lengthMeters / cruiseSpeedMs;
+      final linkMeters = previous == null
+          ? 0.0
+          : _distance(previous, s.segment.midpoint).toDouble();
+      final t = (linkMeters + s.segment.lengthMeters) / cruiseSpeedMs;
       elapsed += t;
       // Probabilité de se garer précisément sur ce tronçon.
       final pHere = probStillSearching * s.probabilityFree;
       expected += pHere * elapsed;
       probStillSearching *= 1.0 - s.probabilityFree;
+      previous = s.segment.midpoint;
     }
     // Les échecs comptent pour la durée totale de la boucle.
     expected += probStillSearching * elapsed;

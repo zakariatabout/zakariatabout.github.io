@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'design_system/design_system.dart';
 import 'screens/map_screen.dart';
 
 void main() {
@@ -14,14 +15,11 @@ class ParkingApp extends StatelessWidget {
     return MaterialApp(
       title: 'ParkRadar',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1565C0),
-          brightness: Brightness.light,
-        ),
-        fontFamily: 'Roboto',
-        useMaterial3: true,
-      ),
+      theme: ParkRadarTheme.light,
+      darkTheme: ParkRadarTheme.dark,
+      themeMode: ThemeMode.system,
+      themeAnimationDuration: ParkRadarMotion.standard,
+      themeAnimationCurve: ParkRadarMotion.enter,
       home: const MapScreen(),
     );
   }

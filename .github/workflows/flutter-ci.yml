@@ -1,0 +1,164 @@
+name: Qualité Flutter ParkRadar
+
+on:
+  push:
+    paths:
+      - 'parking-app/app/**'
+      - 'parking-app/*.sh'
+      - 'parking-app/supabase/**'
+      - 'parking/**'
+      - '.github/workflows/flutter-ci.yml'
+  pull_request:
+    paths:
+      - 'parking-app/app/**'
+      - 'parking-app/*.sh'
+      - 'parking-app/supabase/**'
+      - 'parking/**'
+      - '.github/workflows/flutter-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parkradar-flutter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Analyse, tests et build web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: parking-app/app
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Installer Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.44.6'
+          channel: stable
+          cache: true
+
+      - name: Installer Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: lts
+
+      - name: Résoudre les dépendances
+        run: flutter pub get
+
+      - name: Vérifier les scripts de livraison
+        working-directory: .
+        run: bash -n parking-app/build_web.sh parking-app/verify_backend.sh parking-app/run_ios.sh
+
+      - name: Vérifier l'Edge Function
+        working-directory: .
+        run: |
+          deno fmt --check \
+            parking-app/supabase/functions/report-parking-event/ \
+            parking-app/supabase/schema_parse_test.ts
+          deno check parking-app/supabase/functions/report-parking-event/index.ts
+          deno test parking-app/supabase/functions/report-parking-event/index_test.ts
+
+      - name: Parser la migration PostgreSQL
+        working-directory: .
+        run: deno test --allow-read parking-app/supabase/schema_parse_test.ts
+
+      - name: Vérifier le formatage
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyser le code
+        run: flutter analyze --fatal-infos
+
+      - name: Exécuter les tests
+        run: flutter test --coverage
+
+      - name: Exiger une couverture minimale
+        run: |
+          awk -F: '
+            /^LF:/ { lines += $2 }
+            /^LH:/ { hits += $2 }
+            END {
+              if (lines == 0) exit 2
+              coverage = 100 * hits / lines
+              printf "Couverture lignes : %.2f%%\n", coverage
+              if (coverage < 75) exit 1
+            }
+          ' coverage/lcov.info
+
+      - name: Construire GitHub Pages
+        run: flutter build web --release --base-href /parking/
+
+      - name: Vérifier le dossier GitHub Pages versionné
+        run: |
+          diff --recursive --brief \
+            --exclude=.last_build_id \
+            --exclude=flutter_bootstrap.js \
+            build/web ../../parking
+          diff \
+            <(sed -E 's/serviceWorkerVersion: "[0-9]+"/serviceWorkerVersion: "<build>"/' build/web/flutter_bootstrap.js) \
+            <(sed -E 's/serviceWorkerVersion: "[0-9]+"/serviceWorkerVersion: "<build>"/' ../../parking/flutter_bootstrap.js)
+
+      - name: Vérifier le backend avant publication main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: .
+        env:
+          PARKRADAR_HEALTHCHECK_TOKEN: ${{ secrets.PARKRADAR_HEALTHCHECK_TOKEN }}
+        run: ./parking-app/verify_backend.sh
+
+      - name: Conserver le build de validation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parkradar-web-${{ github.sha }}
+          path: parking-app/app/build/web
+          if-no-files-found: error
+          retention-days: 7
+
+  mobile:
+    name: Build ${{ matrix.label }}
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: parking-app/app
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Android
+            os: ubuntu-latest
+            command: flutter build apk --release
+          - label: iOS sans signature
+            os: macos-latest
+            command: flutter build ios --release --no-codesign
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Installer Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.44.6'
+          channel: stable
+          cache: true
+
+      - name: Résoudre les dépendances
+        run: flutter pub get
+
+      - name: Vérifier la permission GPS Android
+        if: matrix.label == 'Android'
+        run: grep -q 'android.permission.ACCESS_FINE_LOCATION' android/app/src/main/AndroidManifest.xml
+
+      - name: Vérifier le texte de permission GPS iOS
+        if: matrix.label == 'iOS sans signature'
+        run: |
+          description="$(plutil -extract NSLocationWhenInUseUsageDescription raw -o - ios/Runner/Info.plist)"
+          test -n "$description"
+
+      - name: Compiler
+        run: ${{ matrix.command }}

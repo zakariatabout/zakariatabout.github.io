@@ -1,19 +1,26 @@
-import 'dart:convert';
-
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import '../config.dart';
 import '../models/street_segment.dart';
+import 'network_client.dart';
 
 /// Récupère les tronçons de rue stationnables autour d'un point via
 /// l'API Overpass (OpenStreetMap).
 class OverpassService {
-  OverpassService({http.Client? client}) : _client = client ?? http.Client();
+  OverpassService({
+    http.Client? client,
+    String? endpoint,
+    String? fallbackEndpoint,
+    Duration? timeout,
+  }) : _endpoints = _buildEndpoints(endpoint, fallbackEndpoint),
+       _network = NetworkClient(
+         client: client,
+         timeout: timeout ?? AppConfig.overpassTimeout,
+       );
 
-  final http.Client _client;
-
-  static const _endpoint = 'https://overpass-api.de/api/interpreter';
+  final List<Uri> _endpoints;
+  final NetworkClient _network;
 
   static const _noParkingValues = {
     'no_parking',
@@ -28,7 +35,38 @@ class OverpassService {
     LatLng center, {
     int radiusMeters = 400,
   }) async {
-    final query = '''
+    if (!center.latitude.isFinite ||
+        !center.longitude.isFinite ||
+        center.latitude < -90 ||
+        center.latitude > 90 ||
+        center.longitude < -180 ||
+        center.longitude > 180 ||
+        radiusMeters < 50 ||
+        radiusMeters > 2000) {
+      throw ArgumentError('Centre ou rayon Overpass invalide');
+    }
+    NetworkException? lastError;
+    for (final endpoint in _endpoints) {
+      try {
+        return await _fetchSegmentsFrom(
+          endpoint,
+          center,
+          radiusMeters: radiusMeters,
+        );
+      } on NetworkException catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? StateError('Aucun endpoint Overpass configuré');
+  }
+
+  Future<List<StreetSegment>> _fetchSegmentsFrom(
+    Uri endpoint,
+    LatLng center, {
+    required int radiusMeters,
+  }) async {
+    final query =
+        '''
 [out:json][timeout:25];
 way(around:$radiusMeters,${center.latitude},${center.longitude})
   ["highway"~"^(residential|living_street|unclassified|tertiary|secondary)\$"]
@@ -36,44 +74,79 @@ way(around:$radiusMeters,${center.latitude},${center.longitude})
 out geom tags;
 ''';
 
-    final resp = await _client.post(
-      Uri.parse(_endpoint),
+    final resp = await _network.post(
+      endpoint,
       headers: const {'User-Agent': kUserAgent},
       body: {'data': query},
     );
-    if (resp.statusCode != 200) {
-      throw Exception('Overpass HTTP ${resp.statusCode}');
-    }
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    _network.requireSuccess(resp, endpoint, acceptedStatusCodes: const {200});
+    final data = _network.decodeObject(resp, endpoint);
     final elements = (data['elements'] as List?) ?? const [];
 
-    final segments = <StreetSegment>[];
-    for (final e in elements) {
-      final el = e as Map<String, dynamic>;
-      final geometry = (el['geometry'] as List?) ?? const [];
-      if (geometry.length < 2) continue;
-      final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
-
-      segments.add(
-        StreetSegment(
-          id: el['id'] as int,
-          name: (tags['name'] as String?) ?? 'Rue sans nom',
-          highwayType: (tags['highway'] as String?) ?? 'residential',
-          isOneWay: tags['oneway'] == 'yes' || tags['oneway'] == '-1',
-          parkingForbidden: _isParkingForbidden(tags),
-          parkingSides: _explicitParkingSides(tags),
-          points: [
-            for (final g in geometry)
+    try {
+      final segments = <StreetSegment>[];
+      for (final e in elements) {
+        if (e is! Map) continue;
+        final el = e.cast<String, dynamic>();
+        final geometry = (el['geometry'] as List?) ?? const [];
+        if (geometry.length < 2) continue;
+        final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+        final points = <LatLng>[
+          for (final rawPoint in geometry)
+            if (rawPoint is Map &&
+                rawPoint['lat'] is num &&
+                rawPoint['lon'] is num)
               LatLng(
-                (g['lat'] as num).toDouble(),
-                (g['lon'] as num).toDouble(),
+                (rawPoint['lat'] as num).toDouble(),
+                (rawPoint['lon'] as num).toDouble(),
               ),
-          ],
-        ),
+        ];
+        if (points.length < 2) continue;
+
+        segments.add(
+          StreetSegment(
+            id: (el['id'] as num).toInt(),
+            name: (tags['name'] as String?) ?? 'Rue sans nom',
+            highwayType: (tags['highway'] as String?) ?? 'residential',
+            isOneWay: tags['oneway'] == 'yes' || tags['oneway'] == '-1',
+            parkingForbidden: _isParkingForbidden(tags),
+            parkingSides: _explicitParkingSides(tags),
+            points: points,
+          ),
+        );
+      }
+      return segments;
+    } catch (error) {
+      throw NetworkPayloadException(
+        'Réponse Overpass invalide',
+        uri: endpoint,
+        cause: error,
       );
     }
-    return segments;
   }
+
+  static List<Uri> _buildEndpoints(String? endpoint, String? fallbackEndpoint) {
+    final primary = parseHttpEndpoint(
+      endpoint ?? AppConfig.overpassUrl,
+      configName: 'OVERPASS_URL',
+    );
+    // Un endpoint explicitement injecté est isolé par défaut, ce qui rend les
+    // tests et les déploiements privés déterministes. Le fallback public ne
+    // s'active automatiquement que pour la configuration embarquée.
+    final fallbackRaw =
+        fallbackEndpoint ??
+        (endpoint == null ? AppConfig.overpassFallbackUrl : '');
+    if (fallbackRaw.trim().isEmpty) return [primary];
+    final fallback = parseHttpEndpoint(
+      fallbackRaw,
+      configName: 'OVERPASS_FALLBACK_URL',
+    );
+    return fallback == primary ? [primary] : [primary, fallback];
+  }
+
+  void close() => _network.close();
+
+  void dispose() => close();
 
   static bool _isParkingForbidden(Map<String, dynamic> tags) {
     final both = tags['parking:lane:both'] ?? tags['parking:both'];

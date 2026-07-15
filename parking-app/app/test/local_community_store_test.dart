@@ -23,13 +23,42 @@ void main() {
     expect(events, isEmpty);
   });
 
-  test('plusieurs signalements sont conservés et triés du plus récent', () async {
-    final store = LocalCommunityStore();
-    await store.report('parked', center);
+  test(
+    'plusieurs signalements sont conservés et triés du plus récent',
+    () async {
+      final store = LocalCommunityStore();
+      await store.report('parked', center);
+      await store.report('freed', center);
+      final events = await store.recentEventsNear(center);
+      expect(events.length, 2);
+      expect(
+        events.first.createdAt.isAfter(events.last.createdAt) ||
+            events.first.createdAt.isAtSameMomentAs(events.last.createdAt),
+        isTrue,
+      );
+    },
+  );
+
+  test('purge physiquement les événements au-delà du TTL', () async {
+    var clock = DateTime.utc(2026, 7, 15, 10);
+    final store = LocalCommunityStore(
+      now: () => clock,
+      retention: const Duration(hours: 1),
+    );
     await store.report('freed', center);
-    final events = await store.recentEventsNear(center);
-    expect(events.length, 2);
-    expect(events.first.createdAt.isAfter(events.last.createdAt) ||
-        events.first.createdAt.isAtSameMomentAs(events.last.createdAt), isTrue);
+
+    clock = clock.add(const Duration(hours: 2));
+    await store.purgeExpired();
+
+    final events = await store.recentEventsNear(
+      center,
+      maxAge: const Duration(days: 1),
+    );
+    expect(events, isEmpty);
+  });
+
+  test('refuse un type de signalement inconnu', () async {
+    final store = LocalCommunityStore();
+    expect(await store.report('unknown', center), isFalse);
   });
 }

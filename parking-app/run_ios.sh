@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Lance ParkRadar sur l'iPhone branché en USB, avec la couche communautaire
-# Supabase activée (mêmes clés que le web). À exécuter sur votre Mac, iPhone
-# connecté et déverrouillé.
+# Lance ParkRadar sur l'iPhone branché en USB avec le client Supabase configuré
+# comme sur le web. La communauté distante n'est opérationnelle que si
+# verify_backend.sh est vert. À exécuter sur votre Mac, iPhone connecté et
+# déverrouillé.
 #
 # Prérequis : Flutter + Xcode + CocoaPods installés (voir README).
 set -euo pipefail
