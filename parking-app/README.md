@@ -4,13 +4,16 @@ Application Flutter qui guide le conducteur vers une **place de stationnement da
 on saisit une destination, l'app colore les rues alentour selon la **probabilité d'y trouver
 une place** et propose une **boucle de recherche guidée** qui maximise les chances de se garer.
 
-L'étude de faisabilité complète est dans [ETUDE.md](ETUDE.md).
+L'étude de faisabilité initiale est dans [ETUDE.md](ETUDE.md). L'audit stratégique et
+technique approfondi 2026 est dans
+[ETUDE_FIABILITE_PRODUIT_2026.md](ETUDE_FIABILITE_PRODUIT_2026.md).
 
 ## Structure
 
 ```
 parking-app/
   ETUDE.md            Étude de faisabilité (marché, algorithmes, feuille de route)
+  ETUDE_FIABILITE_PRODUIT_2026.md  Audit fiabilité, prédiction, UX et architecture cible
   app/                Application Flutter (web + Android)
     lib/
       models/street_segment.dart        Tronçon de rue + score
@@ -20,7 +23,7 @@ parking-app/
       services/routing_service.dart     Itinéraire voiture (OSRM)
       services/search_loop_planner.dart Boucle de recherche optimale (seuil 90 %)
       screens/map_screen.dart           Carte, heatmap, panneau, guidage
-    test/                               16 tests unitaires (moteur + planificateur)
+    test/                               34 tests unitaires (services + modèles)
 ```
 
 ## Données utilisées (MVP)
