@@ -19,8 +19,8 @@ class ProbabilityEngine {
   /// explicitement qu'aucune calibration supervisée n'est disponible.
   final ProbabilityCalibrator calibrator;
 
-  static const String modelVersion = 'heuristic-diminishing-v2';
-  static const String defaultDataVersion = 'paris-inventory-hourly-prior-v2';
+  static const String modelVersion = 'heuristic-paris-hourly-v3';
+  static const String defaultDataVersion = 'paris-inventory-hourly-prior-v3';
   static const Duration defaultValidity = Duration(minutes: 15);
 
   /// Longueur moyenne d'une place en créneau (m).
@@ -36,21 +36,32 @@ class ProbabilityEngine {
   /// indépendantes qu'elle contient de places théoriques : interdictions
   /// locales, rotation et arrivée future sont corrélées. Cette échelle évite
   /// donc que les longs tronçons saturent artificiellement près de 100 %.
-  static const double findabilityFactor = 2.5;
+  ///
+  /// Relevée de 2.5 à 4.0 après l'audit de crédibilité : en conditions
+  /// réelles, seules 5 à 10 places d'une longue rue sont des occasions
+  /// réellement décorrélées, et l'écart affiché entre une rue courte et une
+  /// rue longue devenait invraisemblable en soirée.
+  static const double findabilityFactor = 4.0;
 
-  /// Profil d'occupation par heure (0-23) pour une rue résidentielle :
-  /// saturée la nuit, se libère en journée.
+  /// Profil d'occupation par heure (0-23) pour une rue résidentielle
+  /// parisienne. Calé sur les enquêtes de rotation : saturée la nuit,
+  /// creux modéré en journée (le stationnement payant limite les pendulaires),
+  /// remontée dès 17-18h avec le retour des résidents — le stationnement
+  /// devient gratuit à 20h, donc la rue est déjà presque pleine à 20h.
   static const List<double> _residentialProfile = [
-    0.97, 0.97, 0.97, 0.97, 0.96, 0.95, 0.92, 0.86, // 0h-7h
-    0.78, 0.72, 0.70, 0.72, 0.74, 0.72, 0.70, 0.72, // 8h-15h
-    0.75, 0.80, 0.88, 0.93, 0.95, 0.96, 0.97, 0.97, // 16h-23h
+    0.97, 0.97, 0.97, 0.97, 0.97, 0.96, 0.95, 0.92, // 0h-7h
+    0.87, 0.82, 0.78, 0.77, 0.78, 0.78, 0.77, 0.77, // 8h-15h
+    0.79, 0.84, 0.89, 0.93, 0.96, 0.97, 0.97, 0.97, // 16h-23h
   ];
 
-  /// Profil pour une rue mixte / animée : pic en journée et en soirée.
+  /// Profil pour une rue mixte / animée (commerces, restaurants) : deux pics
+  /// (déjeuner et surtout dîner 19-21h, quand résidents et visiteurs se
+  /// disputent les mêmes places), creux relatif en milieu de matinée et
+  /// d'après-midi grâce à la rotation des places payantes.
   static const List<double> _mixedProfile = [
-    0.80, 0.78, 0.76, 0.75, 0.75, 0.78, 0.82, 0.87, // 0h-7h
-    0.92, 0.95, 0.96, 0.96, 0.95, 0.94, 0.94, 0.95, // 8h-15h
-    0.95, 0.94, 0.93, 0.94, 0.93, 0.90, 0.86, 0.82, // 16h-23h
+    0.93, 0.90, 0.88, 0.87, 0.87, 0.87, 0.86, 0.84, // 0h-7h
+    0.82, 0.80, 0.82, 0.86, 0.90, 0.90, 0.85, 0.82, // 8h-15h
+    0.82, 0.86, 0.91, 0.95, 0.96, 0.95, 0.93, 0.93, // 16h-23h
   ];
 
   /// Estime la capacité de stationnement d'un tronçon.
@@ -83,12 +94,28 @@ class ProbabilityEngine {
     final profile = residential ? _residentialProfile : _mixedProfile;
     var occ = profile[when.hour];
 
-    // Le week-end : les rues résidentielles restent pleines en journée,
-    // les zones mixtes sont plus chargées le samedi et plus calmes le dimanche.
+    // Le week-end : le dimanche le stationnement est gratuit, les voitures
+    // résidentes ne bougent presque pas ; les zones mixtes respirent, sauf au
+    // déjeuner. Le samedi, tout est plus chargé (courses, visites).
     if (when.weekday == DateTime.saturday) {
-      occ = residential ? occ + 0.05 : occ + 0.02;
+      occ = residential ? occ + 0.04 : occ + 0.03;
     } else if (when.weekday == DateTime.sunday) {
-      occ = residential ? occ + 0.06 : occ - 0.08;
+      if (residential) {
+        occ = math.max(occ, 0.95);
+      } else {
+        occ -= 0.06;
+        if (when.hour >= 12 && when.hour <= 14) occ += 0.06;
+      }
+    }
+
+    // Vendredi et samedi en début de soirée (18-20h) : retour des résidents
+    // et sorties simultanés, la pression monte encore d'un cran.
+    if (residential &&
+        (when.weekday == DateTime.friday ||
+            when.weekday == DateTime.saturday) &&
+        when.hour >= 18 &&
+        when.hour <= 20) {
+      occ += 0.02;
     }
 
     // Les axes importants tournent plus (arrêts courts) : occupation

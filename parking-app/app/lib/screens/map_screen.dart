@@ -2068,6 +2068,7 @@ class _MapScreenState extends State<MapScreen>
     final loopSummary = routeMinutes == null
         ? '${loop.orderedSegments.length} zones à parcourir'
         : 'boucle routée d’environ $routeMinutes min';
+    final difficulty = loop.difficulty;
     final guiding = state.phase == ParkingMapPhase.guiding;
     final preview = state.phase == ParkingMapPhase.preview;
     final canRoute = state.canStartGuidance;
@@ -2086,7 +2087,7 @@ class _MapScreenState extends State<MapScreen>
                   Text(
                     guiding
                         ? 'Recherche guidée en cours'
-                        : _availabilityLabel(best.probabilityFree),
+                        : '${difficulty.label} · ${difficulty.expectedTimeLabel}',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: ParkRadarSpacing.xxs),
@@ -2408,13 +2409,6 @@ class _MapScreenState extends State<MapScreen>
     return _AvailabilityLevel.high;
   }
 
-  String _availabilityLabel(double value) {
-    return switch (_availabilityLevel(value)) {
-      _AvailabilityLevel.low => 'Signal estimé faible',
-      _AvailabilityLevel.medium => 'Signal estimé modéré',
-      _AvailabilityLevel.high => 'Signal estimé favorable',
-    };
-  }
 
   String _noticeTitle(ParkingMapState state) {
     if (state.phase == ParkingMapPhase.failure ||

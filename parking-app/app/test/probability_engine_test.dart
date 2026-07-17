@@ -78,11 +78,47 @@ void main() {
       );
     });
 
-    test('rue mixte plus occupée en journée que la nuit', () {
+    test('rue mixte plus occupée au pic du dîner qu au petit matin', () {
       final s = segment(highway: 'tertiary');
+      final dinnerPeak = DateTime(2026, 7, 14, 19);
+      final earlyMorning = DateTime(2026, 7, 14, 5);
       expect(
-        engine.estimateOccupancy(s, tuesdayMorning),
-        greaterThan(engine.estimateOccupancy(s, tuesdayNight)),
+        engine.estimateOccupancy(s, dinnerPeak),
+        greaterThan(engine.estimateOccupancy(s, earlyMorning)),
+      );
+    });
+
+    test('à 19h une rue animée est plus dure qu une rue résidentielle', () {
+      // Le test terrain de l'utilisateur (19h) : les deux types de rue sont
+      // sous pression, mais la rue à restaurants doit être la pire.
+      final dinner = DateTime(2026, 7, 14, 19);
+      final residential = engine.estimateOccupancy(
+        segment(highway: 'residential'),
+        dinner,
+      );
+      final mixed = engine.estimateOccupancy(
+        segment(highway: 'unclassified'),
+        dinner,
+      );
+      expect(residential, greaterThan(0.9));
+      expect(mixed, greaterThan(residential));
+    });
+
+    test('dimanche une rue résidentielle reste saturée toute la journée', () {
+      final sundayNoon = DateTime(2026, 7, 19, 11);
+      expect(
+        engine.estimateOccupancy(segment(highway: 'residential'), sundayNoon),
+        greaterThanOrEqualTo(0.95),
+      );
+    });
+
+    test('vendredi soir la pression résidentielle monte encore', () {
+      final fridayEvening = DateTime(2026, 7, 17, 19);
+      final tuesdayEvening = DateTime(2026, 7, 14, 19);
+      final s = segment(highway: 'residential');
+      expect(
+        engine.estimateOccupancy(s, fridayEvening),
+        greaterThan(engine.estimateOccupancy(s, tuesdayEvening)),
       );
     });
 

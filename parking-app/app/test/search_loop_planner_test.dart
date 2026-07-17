@@ -77,5 +77,21 @@ void main() {
     final minutes = planner.expectedSearchMinutes(loop);
     expect(minutes, greaterThan(0));
     expect(minutes, lessThan(30));
+    expect(loop.expectedSearchMinutes, minutes);
+  });
+
+  test('la difficulté produit suit les seuils de temps de recherche', () {
+    expect(SearchDifficulty.fromMinutes(0), SearchDifficulty.easy);
+    expect(SearchDifficulty.fromMinutes(2.9), SearchDifficulty.easy);
+    expect(SearchDifficulty.fromMinutes(3), SearchDifficulty.moderate);
+    expect(SearchDifficulty.fromMinutes(7.9), SearchDifficulty.moderate);
+    expect(SearchDifficulty.fromMinutes(8), SearchDifficulty.hard);
+    expect(SearchDifficulty.fromMinutes(14.9), SearchDifficulty.hard);
+    expect(SearchDifficulty.fromMinutes(15), SearchDifficulty.veryHard);
+  });
+
+  test('une boucle facile expose une difficulté facile', () {
+    final loop = planner.plan([scored(id: 1, pFree: 0.9)], dest);
+    expect(loop.difficulty, SearchDifficulty.easy);
   });
 }

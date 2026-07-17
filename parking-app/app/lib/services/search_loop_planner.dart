@@ -4,6 +4,30 @@ import 'package:latlong2/latlong.dart';
 
 import '../models/street_segment.dart';
 
+/// Difficulté de recherche communiquée à l'utilisateur.
+///
+/// Décision de l'étude design : le produit ne montre jamais de pourcentage
+/// (invérifiable pour l'utilisateur), il parle en temps de recherche estimé,
+/// la seule unité qu'un conducteur peut confronter à son vécu.
+enum SearchDifficulty {
+  easy('Facile', 'moins de 3 min'),
+  moderate('Moyen', '3 à 8 min'),
+  hard('Difficile', '8 à 15 min'),
+  veryHard('Très difficile', 'plus de 15 min');
+
+  const SearchDifficulty(this.label, this.expectedTimeLabel);
+
+  final String label;
+  final String expectedTimeLabel;
+
+  static SearchDifficulty fromMinutes(double minutes) {
+    if (minutes < 3) return easy;
+    if (minutes < 8) return moderate;
+    if (minutes < 15) return hard;
+    return veryHard;
+  }
+}
+
 class SearchLoop {
   SearchLoop({
     required this.orderedSegments,
@@ -22,6 +46,37 @@ class SearchLoop {
   /// l'UI ne doit pas afficher cette valeur comme un pourcentage certain.
   final double cumulativeProbability;
   final bool isCalibrated;
+
+  static const Distance _distance = Distance();
+
+  /// Temps de recherche espéré (minutes) le long de la boucle, en supposant
+  /// ~15 km/h de vitesse de croisière en recherche.
+  double get expectedSearchMinutes {
+    const cruiseSpeedMs = 15 * 1000 / 3600;
+    var expected = 0.0;
+    var probStillSearching = 1.0;
+    var elapsed = 0.0;
+    LatLng? previous;
+    for (final s in orderedSegments) {
+      final linkMeters = previous == null
+          ? 0.0
+          : _distance(previous, s.segment.midpoint).toDouble();
+      final t = (linkMeters + s.segment.lengthMeters) / cruiseSpeedMs;
+      elapsed += t;
+      // Probabilité de se garer précisément sur ce tronçon.
+      final pHere = probStillSearching * s.probabilityFree;
+      expected += pHere * elapsed;
+      probStillSearching *= 1.0 - s.probabilityFree;
+      previous = s.segment.midpoint;
+    }
+    // Les échecs comptent pour la durée totale de la boucle.
+    expected += probStillSearching * elapsed;
+    return math.max(expected / 60.0, 0);
+  }
+
+  /// Difficulté produit dérivée du temps espéré.
+  SearchDifficulty get difficulty =>
+      SearchDifficulty.fromMinutes(expectedSearchMinutes);
 }
 
 /// Construit la boucle de recherche : la séquence de rues qui maximise les
@@ -133,28 +188,7 @@ class SearchLoopPlanner {
     return ordered;
   }
 
-  /// Temps de recherche espéré (minutes) le long de la boucle, en supposant
-  /// ~20 km/h de vitesse de croisière en recherche.
-  double expectedSearchMinutes(SearchLoop loop) {
-    const cruiseSpeedMs = 15 * 1000 / 3600;
-    var expected = 0.0;
-    var probStillSearching = 1.0;
-    var elapsed = 0.0;
-    LatLng? previous;
-    for (final s in loop.orderedSegments) {
-      final linkMeters = previous == null
-          ? 0.0
-          : _distance(previous, s.segment.midpoint).toDouble();
-      final t = (linkMeters + s.segment.lengthMeters) / cruiseSpeedMs;
-      elapsed += t;
-      // Probabilité de se garer précisément sur ce tronçon.
-      final pHere = probStillSearching * s.probabilityFree;
-      expected += pHere * elapsed;
-      probStillSearching *= 1.0 - s.probabilityFree;
-      previous = s.segment.midpoint;
-    }
-    // Les échecs comptent pour la durée totale de la boucle.
-    expected += probStillSearching * elapsed;
-    return math.max(expected / 60.0, 0);
-  }
+  /// Temps de recherche espéré (minutes). Conservé pour compatibilité :
+  /// le calcul vit désormais sur [SearchLoop.expectedSearchMinutes].
+  double expectedSearchMinutes(SearchLoop loop) => loop.expectedSearchMinutes;
 }
