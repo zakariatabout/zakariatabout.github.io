@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
+// N'exporte ni TileLayer ni Theme : zéro collision avec flutter_map ; le
+// Theme vectoriel transite par MapVectorStyle.
+import 'package:vector_map_tiles/vector_map_tiles.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../config.dart';
@@ -13,10 +16,12 @@ import '../design_system/design_system.dart';
 import '../models/availability_estimate.dart';
 import '../models/street_segment.dart';
 import '../services/community_service.dart';
+import '../services/flutter_test_environment.dart';
 import '../services/geocoding_service.dart';
 import '../services/haptics_service.dart';
 import '../services/location_service.dart';
 import '../services/map_camera_animator.dart';
+import '../services/map_style_repository.dart';
 import '../services/overpass_service.dart';
 import '../services/paris_parking_service.dart';
 import '../services/paris_time.dart';
@@ -125,9 +130,35 @@ class _MapScreenState extends State<MapScreen>
   (Object?, Object?, Object?, Object?, _MapLayerMode, ParkRadarColors)?
   _memoStaticMarkersKey;
   List<Polyline<ParkingSpot>>? _memoLegal;
-  (Object?, ParkRadarColors)? _memoLegalKey;
+  (Object?, ParkRadarColors, double)? _memoLegalKey;
   bool _mapReady = false;
   bool _tileUnavailable = false;
+
+  // ── Fond vectoriel ───────────────────────────────────────────────────────
+  // Un seul jeu de providers pour toute la vie de l'app : objet stable pour
+  // didUpdateWidget (vector_map_tiles) + cache disque pbf partagé.
+  static final TileProviders _vectorTileProviders = TileProviders({
+    // La clé DOIT égaler le champ "source" des layers du style.
+    'openmaptiles': NetworkVectorTileProvider(
+      urlTemplate: AppConfig.vectorTileUrlTemplate,
+      // maxzoom réel du tileset OpenFreeMap planet : au-delà le serveur
+      // répond 404, transformé en tuile vide SILENCIEUSE (carte unie aux
+      // zooms 15+). Avec 14, l'overzoom 15→20 est géré par le moteur.
+      maximumZoom: 14,
+      minimumZoom: 1,
+      httpHeaders: const {
+        'User-Agent': 'ParkRadar/1.1 (fr.zakariatabout.parking_app)',
+      },
+    ),
+  });
+
+  /// Vecteur actif : opt-in config, jamais sous `flutter test` (flutter_gpu
+  /// indisponible + fetchs HTTP 400 => async errors non rattrapées dans
+  /// MapTiles._start), et seulement une fois les styles parsés.
+  bool get _vectorRendererActive =>
+      AppConfig.useVectorRenderer &&
+      !isFlutterTestEnvironment &&
+      MapStyleRepository.instance.isReady;
   bool _parkedSharedWithCommunity = false;
   int _parkingSessionGeneration = 0;
   Future<void> _sessionStoreTail = Future<void>.value();
@@ -174,6 +205,15 @@ class _MapScreenState extends State<MapScreen>
     _searchController.text = _lastState.query;
     _controller.addListener(_handleControllerChanged);
     unawaited(_restoreParkingSession());
+    if (AppConfig.useVectorRenderer && !isFlutterTestEnvironment) {
+      // Déjà lancé par main() : ensureLoaded est idempotent. Un seul
+      // setState au chargement pour basculer raster → vecteur.
+      MapStyleRepository.instance.ensureLoaded().then((_) {
+        if (mounted && MapStyleRepository.instance.isReady) {
+          setState(() {});
+        }
+      });
+    }
   }
 
   @override
@@ -842,6 +882,15 @@ class _MapScreenState extends State<MapScreen>
     // Un template sombre dédié (env MAP_TILE_URL_TEMPLATE_DARK) est déjà
     // sombre : ne surtout pas l'inverser (la config retombe sur le template
     // clair OSM quand l'env est vide — cas prod).
+    // ── Fond de carte ──
+    // Chemin nominal : vectoriel GPU (styles ParkRadar sur OpenFreeMap).
+    // Replis conservés à l'identique : MAP_RENDERER=raster, flutter test,
+    // styles pas encore chargés ou invalides.
+    final vectorStyle = _vectorRendererActive
+        ? (isDark
+              ? MapStyleRepository.instance.dark
+              : MapStyleRepository.instance.light)
+        : null;
     final hasNativeDarkTiles =
         AppConfig.mapTileUrlTemplateDark != AppConfig.mapTileUrlTemplate;
     // Le filtre d'adoucissement clair ne vaut que pour l'OSM standard : les
@@ -864,6 +913,27 @@ class _MapScreenState extends State<MapScreen>
         duration: Duration(milliseconds: 200),
       ),
     );
+    final Widget baseLayer;
+    if (vectorStyle != null) {
+      baseLayer = VectorTileLayer(
+        // Enfant DIRECT de FlutterMap obligatoire (l'adaptateur lit
+        // MapController.maybeOf(context)). Jamais de ColorFiltered/Opacity
+        // autour (repaint du CustomPaint GPU entier). Clé stable : le switch
+        // dark/light passe par didUpdateWidget qui reconstruit le renderer
+        // (rechargement visible ~1 s : normal et assumé).
+        key: const ValueKey('parkradar-vector-base'),
+        theme: vectorStyle.theme,
+        tileProviders: _vectorTileProviders,
+        tileOffset: TileOffset.DEFAULT, // .mapbox est réservé à Mapbox
+        concurrency: VectorTileLayer.defaultConcurrency,
+        fileCacheTtl: const Duration(days: 14),
+        fileCacheMaximumSizeInBytes: 60 * 1024 * 1024,
+      );
+    } else if (tileFilter == null) {
+      baseLayer = tileLayer;
+    } else {
+      baseLayer = ColorFiltered(colorFilter: tileFilter, child: tileLayer);
+    }
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
@@ -871,18 +941,21 @@ class _MapScreenState extends State<MapScreen>
         initialZoom: 13,
         minZoom: 11,
         maxZoom: 20,
-        // Peint par FlutterMap SOUS les children, donc HORS du ColorFiltered :
-        // couleur assortie au fond réel des tuiles pour éviter tout flash.
-        backgroundColor: isDark
-            ? (hasNativeDarkTiles
-                  // Fond CARTO Dark Matter RASTER (dark_all) : @landmass_fill
-                  // #090909 du CartoCSS dark-matter.tm2 — achromatique.
-                  ? const Color(0xFF090909)
-                  : ParkRadarMapFilters.darkBackdrop)
-            : (osmStandardLight
-                  ? ParkRadarMapFilters.lightBackdrop
-                  // Fond CARTO Positron (@landmass_fill #fafaf8).
-                  : const Color(0xFFFAFAF8)),
+        // Peint par FlutterMap SOUS les children : il transparaît pendant le
+        // chargement et en cas d'erreur de tuile (pas de fade-in en GPU).
+        // Vectoriel : EXACTEMENT le background-color du style actif.
+        backgroundColor:
+            vectorStyle?.backgroundColor ??
+            (isDark
+                ? (hasNativeDarkTiles
+                      // Fond CARTO Dark Matter RASTER (dark_all) :
+                      // @landmass_fill #090909 — achromatique.
+                      ? const Color(0xFF090909)
+                      : ParkRadarMapFilters.darkBackdrop)
+                : (osmStandardLight
+                      ? ParkRadarMapFilters.lightBackdrop
+                      // Fond CARTO Positron (@landmass_fill #fafaf8).
+                      : const Color(0xFFFAFAF8))),
         onMapReady: _onMapReady,
         onTap: (_, _) {
           _searchFocusNode.unfocus();
@@ -905,10 +978,7 @@ class _MapScreenState extends State<MapScreen>
         },
       ),
       children: [
-        if (tileFilter == null)
-          tileLayer
-        else
-          ColorFiltered(colorFilter: tileFilter, child: tileLayer),
+        baseLayer,
         if (mode == _MapLayerMode.availability)
           PolylineLayer(polylines: _availabilityPolylinesMemo(state, colors)),
         if (mode == _MapLayerMode.legal)
@@ -992,8 +1062,9 @@ class _MapScreenState extends State<MapScreen>
     );
   }
 
-  String get _attributionLabel =>
-      '${AppConfig.mapTileAttribution} · Ville de Paris';
+  String get _attributionLabel => _vectorRendererActive
+      ? '${AppConfig.vectorTileAttribution} · Ville de Paris'
+      : '${AppConfig.mapTileAttribution} · Ville de Paris';
 
   // ── Mémoïsation des couches carte ────────────────────────────────────────
   // L'état du contrôleur est immuable : une comparaison d'identité suffit à
@@ -1051,10 +1122,11 @@ class _MapScreenState extends State<MapScreen>
     final fresh =
         _memoLegalKey == null ||
         !identical(_memoLegalKey!.$1, state.parisSpots) ||
-        !identical(_memoLegalKey!.$2, colors);
+        !identical(_memoLegalKey!.$2, colors) ||
+        _memoLegalKey!.$3 != _availabilityStrokeBase;
     if (fresh) {
       _memoLegal = _legalPolylines(state, colors);
-      _memoLegalKey = (state.parisSpots, colors);
+      _memoLegalKey = (state.parisSpots, colors, _availabilityStrokeBase);
     }
     return _memoLegal!;
   }
@@ -1147,31 +1219,37 @@ class _MapScreenState extends State<MapScreen>
       _AvailabilityLevel.medium => colors.availabilityMedium,
       _AvailabilityLevel.high => colors.availabilityHigh,
     };
-    // Motif par niveau (info jamais portée par la couleur seule), en tirets
-    // longs : les pointillés serrés scintillent sur fond sombre.
-    final pattern = switch (level) {
-      _AvailabilityLevel.low => StrokePattern.dashed(segments: const [10, 9]),
-      _AvailabilityLevel.medium => StrokePattern.dashed(
-        segments: const [18, 7],
-      ),
-      _AvailabilityLevel.high => const StrokePattern.solid(),
+    // Traits PLEINS à bouts ronds (StrokeCap.round est le défaut) : fini les
+    // tirets qui scintillent de près. L'information est portée par LARGEUR +
+    // teinte + légende — jamais par la couleur seule (daltonisme) :
+    // « Favorable » domine nettement, « Faible » s'efface, comme les rues
+    // chaudes/froides de Waze.
+    final width = switch (level) {
+      _AvailabilityLevel.low => _availabilityStrokeBase * 0.55,
+      _AvailabilityLevel.medium => _availabilityStrokeBase * 0.85,
+      _AvailabilityLevel.high => _availabilityStrokeBase * 1.25,
     };
     // Fill OPAQUE obligatoire : color.a < 1 force un saveLayer PAR polyline
-    // bordée et casse le batching. On pré-mélange l'atténuation vers
-    // routeCasing (opaque : bleu-nuit en sombre / blanc en clair).
+    // bordée et casse le batching. Le pré-mélange vers routeCasing (opaque)
+    // estompe les niveaux faibles dans le fond au lieu de les griser.
+    final mutedAlpha = switch (level) {
+      _AvailabilityLevel.low => 0.60,
+      _AvailabilityLevel.medium => 0.78,
+      _AvailabilityLevel.high => 0.92,
+    };
     final fill = emphasized
         ? stroke
-        : Color.alphaBlend(stroke.withValues(alpha: 0.85), colors.routeCasing);
+        : Color.alphaBlend(
+            stroke.withValues(alpha: mutedAlpha),
+            colors.routeCasing,
+          );
     return Polyline(
       points: scored.segment.points,
-      strokeWidth: emphasized
-          ? _availabilityStrokeBase + 1.5
-          : _availabilityStrokeBase,
+      strokeWidth: emphasized ? width + 1.5 : width,
       // borderStrokeWidth s'AJOUTE à strokeWidth, réparti moitié par côté.
       borderStrokeWidth: emphasized ? 3.0 : 2.0,
       borderColor: colors.mapCasing,
       color: fill,
-      pattern: pattern,
     );
   }
 
@@ -1183,7 +1261,10 @@ class _MapScreenState extends State<MapScreen>
       for (final spot in state.parisSpots)
         Polyline(
           points: spot.points,
-          strokeWidth: 7,
+          // « La rue s'épaissit en approchant » : mêmes paliers de zoom que
+          // la disponibilité, +1.5 car cette couche est l'objet inspecté du
+          // mode (elle doit dominer et rester touchable).
+          strokeWidth: _availabilityStrokeBase + 1.5,
           borderStrokeWidth: 2,
           borderColor: colors.mapCasing,
           color: _legalColor(spot.regime, colors),
@@ -1290,38 +1371,64 @@ class _MapScreenState extends State<MapScreen>
     ParkRadarColors colors,
   ) {
     final markers = <Marker>[];
-    for (final event in state.communityEvents.take(24)) {
-      final age = _formatAge(DateTime.now().difference(event.createdAt));
-      final tone = event.isFreed ? colors.success : colors.danger;
-      final sign = event.isFreed ? '+' : '−';
-      markers.add(
-        Marker(
-          point: event.position,
-          width: 88,
-          height: 34,
-          child: Semantics(
-            label: event.isFreed
-                ? 'Signal de place libérée dans cette zone il y a $age'
-                : 'Signal de place prise dans cette zone il y a $age',
-            child: ExcludeSemantics(
-              child: Material(
-                color: tone.background,
-                shape: StadiumBorder(side: BorderSide(color: tone.border)),
-                elevation: 2,
-                child: Center(
-                  child: Text(
-                    'P $sign · $age',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+    // Aperçu & conduite : la carte se vide comme Waze en navigation — seuls
+    // l'itinéraire triple-trait, la boucle et les pastilles d'étapes restent.
+    // Les signaux communauté sont déjà intégrés aux probabilités affichées ;
+    // les re-montrer au volant est du bruit non actionnable.
+    if (mode != _MapLayerMode.route) {
+      for (final event in state.communityEvents.take(24)) {
+        final elapsed = DateTime.now().difference(event.createdAt);
+        final age = _formatAge(elapsed);
+        final tone = event.isFreed ? colors.success : colors.danger;
+        // Point discret façon Waze : plus de pilule texte 88x34 qui recouvre
+        // la rue. Le sens du signal est porté par le glyphe +/− (jamais la
+        // couleur seule), l'information complète (sens + âge) reste dans
+        // Semantics, et le point s'estompe en vieillissant (signal frais =
+        // signal visible).
+        final fadeOpacity = (1 - elapsed.inMinutes / 120)
+            .clamp(0.35, 1.0)
+            .toDouble();
+        markers.add(
+          Marker(
+            point: event.position,
+            width: 20,
+            height: 20,
+            child: Semantics(
+              label: event.isFreed
+                  ? 'Signal de place libérée dans cette zone il y a $age'
+                  : 'Signal de place prise dans cette zone il y a $age',
+              child: ExcludeSemantics(
+                child: Opacity(
+                  opacity: fadeOpacity,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
                       color: tone.foreground,
-                      fontWeight: FontWeight.w700,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: colors.mapCasing, width: 2),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x33000000),
+                          blurRadius: 4,
+                          offset: Offset(0, 1),
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: Icon(
+                        event.isFreed ? Icons.add : Icons.remove,
+                        size: 12,
+                        // routeCasing = blanc en clair / bleu-nuit en sombre :
+                        // toujours opposé au foreground du tone, donc lisible.
+                        color: colors.routeCasing,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      );
+        );
+      }
     }
 
     if (state.destination case final destination?) {
@@ -2115,11 +2222,28 @@ class _MapScreenState extends State<MapScreen>
   Widget _buildLegend(_MapLayerMode mode) {
     final colors = context.parkRadarColors;
     final entries = switch (mode) {
-      // Alignée sur les couleurs et motifs réels des traits de la carte.
+      // La légende reflète la hiérarchie réelle : même couleur ET même
+      // rapport de largeur que les traits dessinés (info jamais couleur
+      // seule).
       _MapLayerMode.availability || _MapLayerMode.route => [
-        _LegendEntry('Faible', colors.availabilityLow, _LineKind.dashed),
-        _LegendEntry('Modéré', colors.availabilityMedium, _LineKind.dashed),
-        _LegendEntry('Favorable', colors.availabilityHigh, _LineKind.solid),
+        _LegendEntry(
+          'Faible',
+          colors.availabilityLow,
+          _LineKind.solid,
+          strokeWidth: 2,
+        ),
+        _LegendEntry(
+          'Modéré',
+          colors.availabilityMedium,
+          _LineKind.solid,
+          strokeWidth: 3.5,
+        ),
+        _LegendEntry(
+          'Favorable',
+          colors.availabilityHigh,
+          _LineKind.solid,
+          strokeWidth: 5,
+        ),
       ],
       _MapLayerMode.legal => [
         _LegendEntry('Payant', colors.brand, _LineKind.solid),
@@ -3040,11 +3164,15 @@ class _AttributionPill extends StatelessWidget {
 }
 
 class _LegendEntry {
-  const _LegendEntry(this.label, this.color, this.kind);
+  const _LegendEntry(this.label, this.color, this.kind, {this.strokeWidth = 3});
 
   final String label;
   final Color color;
   final _LineKind kind;
+
+  /// Épaisseur du témoin : reproduit la hiérarchie par largeur des traits
+  /// de disponibilité (compensation accessibilité, pas de couleur seule).
+  final double strokeWidth;
 }
 
 class _LegendItem extends StatelessWidget {
@@ -3062,11 +3190,12 @@ class _LegendItem extends StatelessWidget {
           children: [
             SizedBox(
               width: 20,
-              height: 10,
+              height: 12,
               child: CustomPaint(
                 painter: _LineSwatchPainter(
                   color: entry.color,
                   kind: entry.kind,
+                  strokeWidth: entry.strokeWidth,
                 ),
               ),
             ),
@@ -3087,21 +3216,26 @@ class _LegendItem extends StatelessWidget {
 }
 
 class _LineSwatchPainter extends CustomPainter {
-  const _LineSwatchPainter({required this.color, required this.kind});
+  const _LineSwatchPainter({
+    required this.color,
+    required this.kind,
+    this.strokeWidth = 3,
+  });
 
   final Color color;
   final _LineKind kind;
+  final double strokeWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 3
+      ..strokeWidth = strokeWidth
       ..strokeCap = StrokeCap.round;
     final y = size.height / 2;
     switch (kind) {
       case _LineKind.solid:
-        canvas.drawLine(Offset(1, y), Offset(size.width - 1, y), paint);
+        canvas.drawLine(Offset(2, y), Offset(size.width - 2, y), paint);
       case _LineKind.dashed:
         for (var x = 1.0; x < size.width; x += 8) {
           canvas.drawLine(
@@ -3119,6 +3253,8 @@ class _LineSwatchPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _LineSwatchPainter oldDelegate) {
-    return color != oldDelegate.color || kind != oldDelegate.kind;
+    return color != oldDelegate.color ||
+        kind != oldDelegate.kind ||
+        strokeWidth != oldDelegate.strokeWidth;
   }
 }

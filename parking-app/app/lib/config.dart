@@ -83,6 +83,30 @@ class AppConfig {
     defaultValue: '© OpenStreetMap · © CARTO',
   );
 
+  // ── Rendu vectoriel (VectorTileLayer GPU, styles ParkRadar) ─────────────
+  /// Tuiles vectorielles OpenFreeMap : gratuites, sans clé, usage commercial
+  /// autorisé, schéma OpenMapTiles. Seuls {z} {x} {y} sont substitués.
+  /// Le maxzoom réel du tileset planet est 14 (voir map_screen.dart).
+  static const String vectorTileUrlTemplate = String.fromEnvironment(
+    'VECTOR_TILE_URL_TEMPLATE',
+    defaultValue: 'https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf',
+  );
+
+  /// 'vector' (défaut) = fond vectoriel GPU stylé ParkRadar.
+  /// 'raster' = repli CARTO actuel (TileLayer), strictement inchangé.
+  /// Ex. : flutter run --dart-define=MAP_RENDERER=raster
+  static const String mapRenderer = String.fromEnvironment(
+    'MAP_RENDERER',
+    defaultValue: 'vector',
+  );
+  static bool get useVectorRenderer => mapRenderer != 'raster';
+
+  /// Attribution du fond vectoriel (obligation OSM + mention OpenFreeMap).
+  static const String vectorTileAttribution = String.fromEnvironment(
+    'VECTOR_TILE_ATTRIBUTION',
+    defaultValue: '© OpenStreetMap · OpenFreeMap',
+  );
+
   static const int networkTimeoutSeconds = int.fromEnvironment(
     'NETWORK_TIMEOUT_SECONDS',
     defaultValue: 30,
