@@ -9,11 +9,26 @@ class RouteProgressSnapshot {
     required this.alongRouteMeters,
     required this.distanceToRouteMeters,
     required this.stepIndex,
+    required this.distanceToNextManeuverMeters,
+    required this.remainingRouteMeters,
+    required this.remainingDurationSeconds,
   });
 
   final double alongRouteMeters;
   final double distanceToRouteMeters;
   final int stepIndex;
+
+  /// Distance restante avant le point de manœuvre de l'étape courante.
+  /// Vaut 0 lorsque la manœuvre est atteinte ou dépassée.
+  final double distanceToNextManeuverMeters;
+
+  /// Distance restante jusqu'à la fin de l'itinéraire.
+  final double remainingRouteMeters;
+
+  /// Durée restante estimée, au prorata de la distance parcourue. C'est une
+  /// estimation (pas une re-évaluation trafic) : suffisante pour un ETA
+  /// honnête, à recaler à chaque reroutage.
+  final double remainingDurationSeconds;
 }
 
 /// Suit une position par projection sur la géométrie OSRM.
@@ -66,10 +81,29 @@ class RouteProgressTracker {
         _alongRouteMeters + maneuverAdvanceMeters >= _stepOffsets[_stepIndex]) {
       _stepIndex++;
     }
+
+    final maneuverOffset = _stepIndex < _stepOffsets.length
+        ? _stepOffsets[_stepIndex]
+        : _alongRouteMeters;
+    final remainingMeters = math.max(
+      0.0,
+      route.distanceMeters - _alongRouteMeters,
+    );
+    // Prorata distance : simple et honnête tant qu'OSRM n'est pas requestionné.
+    final remainingSeconds = route.distanceMeters <= 0
+        ? 0.0
+        : route.durationSeconds * remainingMeters / route.distanceMeters;
+
     return RouteProgressSnapshot(
       alongRouteMeters: _alongRouteMeters,
       distanceToRouteMeters: projection.distanceToRouteMeters,
       stepIndex: _stepIndex,
+      distanceToNextManeuverMeters: math.max(
+        0.0,
+        maneuverOffset - _alongRouteMeters,
+      ),
+      remainingRouteMeters: remainingMeters,
+      remainingDurationSeconds: remainingSeconds,
     );
   }
 

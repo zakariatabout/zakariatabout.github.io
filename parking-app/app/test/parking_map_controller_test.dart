@@ -602,10 +602,62 @@ void main() {
     expect(routedWaypoints, hasLength(1));
 
     final offRoute = LatLng(firstPoint.latitude + 0.003, firstPoint.longitude);
+    // Un point isolé hors itinéraire est du bruit GPS urbain : pas de
+    // recalcul. Il faut des écarts consécutifs pour rerouter.
+    map.updateUserPosition(offRoute);
+    await Future<void>.delayed(Duration.zero);
+    expect(routedWaypoints, hasLength(1));
+    map.updateUserPosition(offRoute);
+    await Future<void>.delayed(Duration.zero);
+    expect(routedWaypoints, hasLength(1));
     map.updateUserPosition(offRoute);
     await Future<void>.delayed(Duration.zero);
     expect(routedWaypoints, hasLength(2));
     expect(routedWaypoints.last.first, offRoute);
+    map.dispose();
+  });
+
+  test('un retour sur l itinéraire remet le compteur d écarts à zéro', () async {
+    var now = DateTime(2026, 7, 15, 12);
+    final routedWaypoints = <List<LatLng>>[];
+    final map = controller(
+      segments: (center) async => [
+        candidate(1, center),
+        candidate(2, LatLng(center.latitude + 0.002, center.longitude)),
+      ],
+      spots: (center) async => [
+        eligibleSpot(center),
+        eligibleSpot(LatLng(center.latitude + 0.002, center.longitude)),
+      ],
+      route: (waypoints) async {
+        routedWaypoints.add(List.of(waypoints));
+        return DrivingRoute(
+          points: waypoints,
+          durationSeconds: 180,
+          distanceMeters: 900,
+        );
+      },
+      clock: () => now,
+    );
+    await map.selectDestination(
+      GeocodingResult(displayName: 'Rue test, Paris', location: firstPoint),
+    );
+    final origin = LatLng(firstPoint.latitude, firstPoint.longitude - 0.002);
+    expect(await map.startGuidance(origin), isTrue);
+    now = now.add(const Duration(seconds: 31));
+
+    final offRoute = LatLng(firstPoint.latitude + 0.003, firstPoint.longitude);
+    map.updateUserPosition(offRoute);
+    map.updateUserPosition(offRoute);
+    // Retour sur l'itinéraire : la série d'écarts est interrompue.
+    map.updateUserPosition(firstPoint);
+    map.updateUserPosition(offRoute);
+    map.updateUserPosition(offRoute);
+    await Future<void>.delayed(Duration.zero);
+    expect(routedWaypoints, hasLength(1));
+    map.updateUserPosition(offRoute);
+    await Future<void>.delayed(Duration.zero);
+    expect(routedWaypoints, hasLength(2));
     map.dispose();
   });
 
@@ -638,6 +690,10 @@ void main() {
     now = now.add(const Duration(seconds: 31));
     const offRouteA = LatLng(48.87, 2.37);
     const offRouteB = LatLng(48.871, 2.371);
+    // Trois écarts consécutifs déclenchent le reroutage ; les suivants
+    // n'empilent pas de second appel tant que le premier est en vol.
+    map.updateUserPosition(offRouteA);
+    map.updateUserPosition(offRouteB);
     map.updateUserPosition(offRouteA);
     map.updateUserPosition(offRouteB);
     await Future<void>.delayed(Duration.zero);

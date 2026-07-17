@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../config.dart';
 import '../controllers/parking_map_controller.dart';
@@ -21,6 +22,8 @@ import '../services/parking_eligibility_service.dart';
 import '../services/parking_session_store.dart';
 import '../services/route_progress_tracker.dart';
 import '../services/routing_service.dart';
+import '../services/search_outcome_store.dart';
+import '../services/voice_guidance_service.dart';
 import '../widgets/widgets.dart';
 
 enum _ParkingSaveMode { deviceOnly, shareZone }
@@ -37,11 +40,15 @@ class MapScreen extends StatefulWidget {
     this.controller,
     this.locationService,
     this.parkingSessionStore,
+    this.speechEngine,
   });
 
   final ParkingMapController? controller;
   final LocationService? locationService;
   final ParkingSessionStore? parkingSessionStore;
+
+  /// Moteur vocal injectable pour les tests (défaut : TTS de la plateforme).
+  final SpeechEngine? speechEngine;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -72,6 +79,27 @@ class _MapScreenState extends State<MapScreen> {
   late ParkingMapState _lastState;
   final _routeProgressTracker = RouteProgressTracker();
   int _guidanceStepIndex = 0;
+  RouteProgressSnapshot? _guidanceSnapshot;
+  late final VoiceGuidanceService _voiceGuidance;
+  bool _voiceMuted = false;
+  bool _cameraFollowing = true;
+  bool _gpsLost = false;
+  Timer? _gpsRetryTimer;
+  int _gpsRetryDelaySeconds = 3;
+  final _outcomeStore = SearchOutcomeStore();
+  PendingSearchContext? _pendingSearch;
+  // Mémoïsation des couches carte : recalculées uniquement quand leurs
+  // entrées changent, pas à chaque échantillon GPS (voir chantier A du plan
+  // d'excellence).
+  List<Polyline>? _memoAvailability;
+  (Object?, Object?, ParkRadarColors)? _memoAvailabilityKey;
+  List<Polyline>? _memoLoopOnly;
+  (Object?, Object?, ParkRadarColors)? _memoLoopOnlyKey;
+  List<Marker>? _memoStaticMarkers;
+  (Object?, Object?, Object?, Object?, _MapLayerMode, ParkRadarColors)?
+  _memoStaticMarkersKey;
+  List<Polyline<ParkingSpot>>? _memoLegal;
+  (Object?, ParkRadarColors)? _memoLegalKey;
   bool _mapReady = false;
   bool _tileUnavailable = false;
   bool _parkedSharedWithCommunity = false;
@@ -109,6 +137,9 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
+    _voiceGuidance = VoiceGuidanceService(
+      engine: widget.speechEngine ?? FlutterTtsSpeechEngine(),
+    );
     _lastState = _controller.state;
     _searchController.text = _lastState.query;
     _controller.addListener(_handleControllerChanged);
@@ -119,6 +150,9 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _controller.removeListener(_handleControllerChanged);
     _trackingGeneration++;
+    _gpsRetryTimer?.cancel();
+    unawaited(WakelockPlus.disable());
+    unawaited(_voiceGuidance.dispose());
     final positionSubscription = _positionSubscription;
     _positionSubscription = null;
     unawaited(positionSubscription?.cancel());
@@ -164,8 +198,28 @@ class _MapScreenState extends State<MapScreen> {
     if (previous.phase == ParkingMapPhase.guiding &&
         next.phase != ParkingMapPhase.guiding) {
       unawaited(_stopPositionTracking());
+      _exitGuidanceSideEffects();
     }
     if (mounted) setState(() {});
+  }
+
+  /// Effets de bord d'entrée en conduite : écran maintenu allumé, caméra
+  /// asservie, annonce vocale de départ.
+  void _enterGuidanceSideEffects() {
+    _cameraFollowing = true;
+    _gpsLost = false;
+    _gpsRetryDelaySeconds = 3;
+    unawaited(WakelockPlus.enable());
+    _voiceGuidance.muted = _voiceMuted;
+    unawaited(_voiceGuidance.announceStart());
+  }
+
+  void _exitGuidanceSideEffects() {
+    _gpsRetryTimer?.cancel();
+    _gpsLost = false;
+    unawaited(WakelockPlus.disable());
+    unawaited(_voiceGuidance.stop());
+    _finalizePendingSearch(SearchOutcome.abandoned);
   }
 
   void _afterMapReady(VoidCallback action) {
@@ -191,9 +245,14 @@ class _MapScreenState extends State<MapScreen> {
     if (route == null || route.steps.isEmpty || state.userPosition == null) {
       return;
     }
-    _guidanceStepIndex = _routeProgressTracker
-        .update(route, state.userPosition!)
-        .stepIndex;
+    final snapshot = _routeProgressTracker.update(route, state.userPosition!);
+    _guidanceSnapshot = snapshot;
+    _guidanceStepIndex = snapshot.stepIndex;
+    if (state.phase == ParkingMapPhase.guiding) {
+      final step =
+          route.steps[snapshot.stepIndex.clamp(0, route.steps.length - 1)];
+      unawaited(_voiceGuidance.onProgress(snapshot, step));
+    }
   }
 
   void _fitCameraTo(List<LatLng> points) {
@@ -256,8 +315,32 @@ class _MapScreenState extends State<MapScreen> {
     if (origin == null || !mounted) return;
     final started = await _controller.startGuidance(origin);
     if (!started || !mounted) return;
+    _enterGuidanceSideEffects();
+    _capturePendingSearch();
     if (_mapReady) _mapController.move(origin, 17);
     await _startPositionTracking();
+  }
+
+  /// Mémorise la prédiction affichée au départ du guidage : c'est elle qui
+  /// sera confrontée à l'issue réelle (trouvé / abandonné) pour la
+  /// calibration supervisée.
+  void _capturePendingSearch() {
+    final state = _controller.state;
+    final loop = state.loop;
+    if (loop == null) return;
+    _pendingSearch = PendingSearchContext(
+      startedAt: DateTime.now(),
+      predictedProbability: loop.cumulativeProbability,
+      isCalibrated: loop.isCalibrated,
+      plannedHour: (state.plannedArrival ?? DateTime.now()).hour,
+    );
+  }
+
+  void _finalizePendingSearch(SearchOutcome outcome) {
+    final pending = _pendingSearch;
+    _pendingSearch = null;
+    if (pending == null) return;
+    unawaited(_outcomeStore.record(pending.finish(outcome)));
   }
 
   Future<void> _startPositionTracking() async {
@@ -279,16 +362,17 @@ class _MapScreenState extends State<MapScreen> {
             return;
           }
           if (!sample.isUsable(DateTime.now(), maxAccuracyMeters: 60)) return;
-          _controller.updateUserPosition(sample.position);
-          if (_mapReady) {
-            _mapController.move(sample.position, 17);
+          if (_gpsLost) {
+            _gpsLost = false;
+            _gpsRetryDelaySeconds = 3;
           }
+          _controller.updateUserPosition(
+            sample.position,
+            accuracyMeters: sample.accuracyMeters,
+          );
+          _followCamera(sample);
         },
-        onError: (Object _) {
-          if (!mounted || generation != _trackingGeneration) return;
-          _showSnack('Suivi GPS interrompu. Le guidage a été arrêté.');
-          _controller.stopGuidance();
-        },
+        onError: (Object _) => _handleGpsLoss(generation),
       );
       if (!mounted ||
           generation != _trackingGeneration ||
@@ -298,10 +382,45 @@ class _MapScreenState extends State<MapScreen> {
       }
       _positionSubscription = subscription;
     } catch (_) {
-      if (!mounted || generation != _trackingGeneration) return;
-      _showSnack('Suivi GPS indisponible. Le guidage a été arrêté.');
-      _controller.stopGuidance();
+      _handleGpsLoss(generation);
     }
+  }
+
+  /// Caméra de conduite : suit la position, s'oriente selon le cap dès que le
+  /// véhicule roule, et adapte le zoom à la vitesse. Ne fait rien si
+  /// l'utilisateur a repris la main (pan manuel).
+  void _followCamera(LocationSample sample) {
+    if (!_mapReady || !_cameraFollowing) return;
+    final speed = sample.speedMetersPerSecond;
+    final zoom = speed > 9 ? 16.0 : 17.0;
+    final heading = sample.headingDegrees;
+    // Le cap GPS n'est fiable qu'en mouvement : à l'arrêt on garde
+    // l'orientation courante au lieu de faire tournoyer la carte.
+    if (speed > 1.5 && heading.isFinite && heading >= 0 && heading <= 360) {
+      _mapController.moveAndRotate(sample.position, zoom, -heading);
+    } else {
+      _mapController.move(sample.position, zoom);
+    }
+  }
+
+  /// Une coupure GPS (tunnel, parking couvert) n'arrête plus le guidage :
+  /// bannière + reprise automatique avec backoff, tant que la phase dure.
+  void _handleGpsLoss(int generation) {
+    if (!mounted || generation != _trackingGeneration) return;
+    if (_controller.state.phase != ParkingMapPhase.guiding) return;
+    if (!_gpsLost) {
+      _gpsLost = true;
+      unawaited(_voiceGuidance.announceGpsLost());
+      if (mounted) setState(() {});
+    }
+    _gpsRetryTimer?.cancel();
+    _gpsRetryTimer = Timer(Duration(seconds: _gpsRetryDelaySeconds), () {
+      if (!mounted || _controller.state.phase != ParkingMapPhase.guiding) {
+        return;
+      }
+      _gpsRetryDelaySeconds = math.min(30, _gpsRetryDelaySeconds * 2);
+      unawaited(_startPositionTracking());
+    });
   }
 
   Future<void> _stopPositionTracking() async {
@@ -322,6 +441,10 @@ class _MapScreenState extends State<MapScreen> {
     if (position == null || !mounted) return;
     final saveMode = await _chooseParkingSaveMode();
     if (saveMode == null || !mounted) return;
+    // Issue positive : la place a été trouvée pendant ce guidage. À
+    // enregistrer avant le changement de phase (qui clôturerait la recherche
+    // en « abandonnée »).
+    _finalizePendingSearch(SearchOutcome.found);
     final parkedAt = DateTime.now();
     final share = saveMode == _ParkingSaveMode.shareZone;
     final sessionGeneration = ++_parkingSessionGeneration;
@@ -557,7 +680,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     final state = _controller.state;
-    return Scaffold(
+    final scaffold = Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
           final sidePanel = ParkRadarBreakpoints.usesSidePanel(
@@ -578,6 +701,12 @@ class _MapScreenState extends State<MapScreen> {
         },
       ),
     );
+    // Thème conduite : contraste élevé forcé pendant le guidage, quelle que
+    // soit la préférence système — l'écran est lu d'un coup d'œil au volant.
+    if (state.phase == ParkingMapPhase.guiding) {
+      return Theme(data: ParkRadarTheme.dark, child: scaffold);
+    }
+    return scaffold;
   }
 
   Widget _buildMap(ParkingMapState state, _MapLayerMode mode, bool sidePanel) {
@@ -595,6 +724,15 @@ class _MapScreenState extends State<MapScreen> {
           _searchFocusNode.unfocus();
           _controller.dismissSuggestions();
         },
+        // Un pan manuel pendant le guidage rend la main à l'utilisateur ;
+        // le bouton « Recentrer » réactive le suivi caméra.
+        onPositionChanged: (camera, hasGesture) {
+          if (hasGesture &&
+              _cameraFollowing &&
+              _controller.state.phase == ParkingMapPhase.guiding) {
+            setState(() => _cameraFollowing = false);
+          }
+        },
       ),
       children: [
         TileLayer(
@@ -605,20 +743,18 @@ class _MapScreenState extends State<MapScreen> {
           errorTileCallback: (_, _, _) => _onTileError(),
         ),
         if (mode == _MapLayerMode.availability)
-          PolylineLayer(polylines: _availabilityPolylines(state, colors)),
+          PolylineLayer(polylines: _availabilityPolylinesMemo(state, colors)),
         if (mode == _MapLayerMode.legal)
           GestureDetector(
             onTap: _openTouchedLegalSpot,
             child: PolylineLayer<ParkingSpot>(
               hitNotifier: _legalHitNotifier,
               minimumHitbox: ParkRadarSizes.minimumTouchTarget / 2,
-              polylines: _legalPolylines(state, colors),
+              polylines: _legalPolylinesMemo(state, colors),
             ),
           ),
         if (mode == _MapLayerMode.route) ...[
-          PolylineLayer(
-            polylines: _availabilityPolylines(state, colors, loopOnly: true),
-          ),
+          PolylineLayer(polylines: _loopPolylinesMemo(state, colors)),
           if (state.route != null)
             PolylineLayer(
               polylines: [
@@ -632,7 +768,11 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
         ],
-        MarkerLayer(markers: _markers(state, mode, colors)),
+        MarkerLayer(markers: _staticMarkersMemo(state, mode, colors)),
+        // Le marqueur véhicule vit dans sa propre couche : c'est le seul
+        // élément carte qui change à chaque échantillon GPS.
+        if (state.userPosition != null)
+          MarkerLayer(markers: [_userMarker(state.userPosition!, colors)]),
         _MapAttribution(
           alignment: sidePanel
               ? Alignment.bottomLeft
@@ -641,6 +781,108 @@ class _MapScreenState extends State<MapScreen> {
           onTap: _openMapAttribution,
         ),
       ],
+    );
+  }
+
+  // ── Mémoïsation des couches carte ────────────────────────────────────────
+  // L'état du contrôleur est immuable : une comparaison d'identité suffit à
+  // savoir si une couche doit être reconstruite. Un échantillon GPS ne
+  // reconstruit ainsi plus que le marqueur véhicule.
+
+  List<Polyline> _availabilityPolylinesMemo(
+    ParkingMapState state,
+    ParkRadarColors colors,
+  ) {
+    final fresh =
+        _memoAvailabilityKey == null ||
+        !identical(_memoAvailabilityKey!.$1, state.scoredSegments) ||
+        !identical(_memoAvailabilityKey!.$2, state.loop) ||
+        !identical(_memoAvailabilityKey!.$3, colors);
+    if (fresh) {
+      _memoAvailability = _availabilityPolylines(state, colors);
+      _memoAvailabilityKey = (state.scoredSegments, state.loop, colors);
+    }
+    return _memoAvailability!;
+  }
+
+  List<Polyline> _loopPolylinesMemo(
+    ParkingMapState state,
+    ParkRadarColors colors,
+  ) {
+    final fresh =
+        _memoLoopOnlyKey == null ||
+        !identical(_memoLoopOnlyKey!.$1, state.scoredSegments) ||
+        !identical(_memoLoopOnlyKey!.$2, state.loop) ||
+        !identical(_memoLoopOnlyKey!.$3, colors);
+    if (fresh) {
+      _memoLoopOnly = _availabilityPolylines(state, colors, loopOnly: true);
+      _memoLoopOnlyKey = (state.scoredSegments, state.loop, colors);
+    }
+    return _memoLoopOnly!;
+  }
+
+  List<Polyline<ParkingSpot>> _legalPolylinesMemo(
+    ParkingMapState state,
+    ParkRadarColors colors,
+  ) {
+    final fresh =
+        _memoLegalKey == null ||
+        !identical(_memoLegalKey!.$1, state.parisSpots) ||
+        !identical(_memoLegalKey!.$2, colors);
+    if (fresh) {
+      _memoLegal = _legalPolylines(state, colors);
+      _memoLegalKey = (state.parisSpots, colors);
+    }
+    return _memoLegal!;
+  }
+
+  List<Marker> _staticMarkersMemo(
+    ParkingMapState state,
+    _MapLayerMode mode,
+    ParkRadarColors colors,
+  ) {
+    final key = (
+      state.communityEvents,
+      state.destination,
+      state.parkedPosition,
+      state.loop,
+      mode,
+      colors,
+    );
+    final previous = _memoStaticMarkersKey;
+    final fresh =
+        previous == null ||
+        !identical(previous.$1, key.$1) ||
+        previous.$2 != key.$2 ||
+        previous.$3 != key.$3 ||
+        !identical(previous.$4, key.$4) ||
+        previous.$5 != key.$5 ||
+        !identical(previous.$6, key.$6);
+    if (fresh) {
+      _memoStaticMarkers = _markers(state, mode, colors);
+      _memoStaticMarkersKey = key;
+    }
+    return _memoStaticMarkers!;
+  }
+
+  Marker _userMarker(LatLng position, ParkRadarColors colors) {
+    return Marker(
+      point: position,
+      width: 28,
+      height: 28,
+      child: Semantics(
+        label: 'Votre position',
+        child: ExcludeSemantics(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: colors.route,
+              shape: BoxShape.circle,
+              border: Border.all(color: colors.routeCasing, width: 4),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -866,30 +1108,8 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
-    if (state.userPosition case final userPosition?) {
-      markers.add(
-        Marker(
-          point: userPosition,
-          width: 28,
-          height: 28,
-          child: Semantics(
-            label: 'Votre position',
-            child: ExcludeSemantics(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: colors.route,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: colors.routeCasing, width: 4),
-                  boxShadow: const [
-                    BoxShadow(color: Colors.black26, blurRadius: 5),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
+    // Le marqueur de position vit dans sa propre couche (voir _userMarker) :
+    // il est le seul à changer à chaque échantillon GPS.
 
     if (state.parkedPosition case final parked?) {
       markers.add(
@@ -1024,6 +1244,29 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   icon: const Icon(Icons.my_location),
                 ),
+                if (state.phase == ParkingMapPhase.guiding &&
+                    !_cameraFollowing) ...[
+                  Divider(
+                    height: 1,
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                  IconButton(
+                    onPressed: () {
+                      setState(() => _cameraFollowing = true);
+                      final position = state.userPosition;
+                      if (position != null && _mapReady) {
+                        _mapController.move(position, 17);
+                      }
+                    },
+                    tooltip: 'Recentrer sur ma position',
+                    color: colors.brand,
+                    constraints: const BoxConstraints.tightFor(
+                      width: ParkRadarSizes.minimumTouchTarget,
+                      height: ParkRadarSizes.minimumTouchTarget,
+                    ),
+                    icon: const Icon(Icons.navigation),
+                  ),
+                ],
                 if (showLegalToggle) ...[
                   Divider(
                     height: 1,
@@ -1250,9 +1493,13 @@ class _MapScreenState extends State<MapScreen> {
             _guidanceStepIndex + 1 < route.steps.length
         ? route.steps[_guidanceStepIndex + 1]
         : null;
-    final meters = step == null || state.userPosition == null
-        ? null
-        : _distance(state.userPosition!, step.location);
+    final snapshot = _guidanceSnapshot;
+    // Distance le long de l'itinéraire (précise) plutôt qu'à vol d'oiseau.
+    final meters =
+        snapshot?.distanceToNextManeuverMeters ??
+        (step == null || state.userPosition == null
+            ? null
+            : _distance(state.userPosition!, step.location));
     final colors = context.parkRadarColors;
     final scheme = Theme.of(context).colorScheme;
 
@@ -1267,64 +1514,154 @@ class _MapScreenState extends State<MapScreen> {
         clipBehavior: Clip.antiAlias,
         child: Padding(
           padding: const EdgeInsets.all(ParkRadarSpacing.sm),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              ExcludeSemantics(
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: colors.brand,
-                    borderRadius: ParkRadarRadii.control,
-                  ),
-                  child: Icon(
-                    _maneuverIcon(step?.maneuver),
-                    color: colors.onBrand,
-                    size: 30,
-                  ),
-                ),
-              ),
-              const SizedBox(width: ParkRadarSpacing.sm),
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      meters == null
-                          ? 'Itinéraire en cours'
-                          : _formatDistance(meters),
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+              Row(
+                children: [
+                  ExcludeSemantics(
+                    child: Container(
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
                         color: colors.brand,
-                        fontWeight: FontWeight.w800,
+                        borderRadius: ParkRadarRadii.control,
+                      ),
+                      child: Icon(
+                        _maneuverIcon(step?.maneuver),
+                        color: colors.onBrand,
+                        size: 36,
                       ),
                     ),
-                    Text(
-                      step?.instruction ?? 'Suivez l’itinéraire',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(width: ParkRadarSpacing.sm),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          meters == null
+                              ? 'Itinéraire en cours'
+                              : _formatDistance(meters),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(
+                                color: colors.brand,
+                                fontWeight: FontWeight.w800,
+                              ),
+                        ),
+                        Text(
+                          step?.instruction ?? 'Suivez l’itinéraire',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        if (nextStep != null)
+                          Text(
+                            'Puis : ${nextStep.instruction}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                      ],
                     ),
-                    if (nextStep != null)
-                      Text(
-                        'Puis : ${nextStep.instruction}',
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        onPressed: _stopGuidance,
+                        tooltip: 'Arrêter le guidage',
+                        icon: const Icon(Icons.close),
+                      ),
+                      IconButton(
+                        onPressed: _toggleVoiceMuted,
+                        tooltip: _voiceMuted
+                            ? 'Réactiver le guidage vocal'
+                            : 'Couper le guidage vocal',
+                        icon: Icon(
+                          _voiceMuted ? Icons.volume_off : Icons.volume_up,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              if (snapshot != null) ...[
+                const SizedBox(height: ParkRadarSpacing.xs),
+                Row(
+                  children: [
+                    Icon(Icons.schedule, size: 16, color: scheme.outline),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        'Arrivée ${_formatEta(snapshot.remainingDurationSeconds)}'
+                        ' · ${_formatDistance(snapshot.remainingRouteMeters)}'
+                        ' restants',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
+                    ),
                   ],
                 ),
-              ),
-              IconButton(
-                onPressed: _stopGuidance,
-                tooltip: 'Arrêter le guidage',
-                icon: const Icon(Icons.close),
-              ),
+              ],
+              if (_gpsLost) ...[
+                const SizedBox(height: ParkRadarSpacing.xs),
+                Semantics(
+                  liveRegion: true,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: ParkRadarSpacing.sm,
+                      vertical: ParkRadarSpacing.xs,
+                    ),
+                    decoration: BoxDecoration(
+                      color: colors.danger.background,
+                      borderRadius: ParkRadarRadii.control,
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.gps_off,
+                          size: 16,
+                          color: colors.danger.foreground,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Signal GPS perdu — reprise automatique en cours…',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: colors.danger.foreground),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  void _toggleVoiceMuted() {
+    setState(() {
+      _voiceMuted = !_voiceMuted;
+      _voiceGuidance.muted = _voiceMuted;
+    });
+    if (_voiceMuted) unawaited(_voiceGuidance.stop());
+  }
+
+  /// Heure d'arrivée estimée (« 18h42 ») à partir de la durée restante.
+  String _formatEta(double remainingSeconds) {
+    final eta = DateTime.now().add(Duration(seconds: remainingSeconds.round()));
+    final h = eta.hour.toString();
+    final m = eta.minute.toString().padLeft(2, '0');
+    return '${h}h$m';
   }
 
   Widget _buildLegend(_MapLayerMode mode) {

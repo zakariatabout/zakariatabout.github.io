@@ -2,6 +2,7 @@
 // ignore_for_file: prefer_initializing_formals
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:latlong2/latlong.dart';
@@ -575,10 +576,10 @@ class ParkingMapController extends ChangeNotifier {
     _emit(_state.copyWith(showLegalLayer: !_state.showLegalLayer));
   }
 
-  void updateUserPosition(LatLng position) {
+  void updateUserPosition(LatLng position, {double? accuracyMeters}) {
     _emit(_state.copyWith(userPosition: position));
     if (_state.phase == ParkingMapPhase.guiding) {
-      _maybeReroute(position);
+      _maybeReroute(position, accuracyMeters: accuracyMeters);
     }
   }
 
@@ -794,7 +795,12 @@ class ParkingMapController extends ChangeNotifier {
     return true;
   }
 
-  void _maybeReroute(LatLng position) {
+  /// Nombre d'échantillons hors itinéraire consécutifs exigés avant un
+  /// recalcul : un unique point GPS aberrant ne doit jamais suffire.
+  static const _offRouteSamplesRequired = 3;
+  int _consecutiveOffRouteSamples = 0;
+
+  void _maybeReroute(LatLng position, {double? accuracyMeters}) {
     final lastAt = _lastRouteAt;
     final route = _state.route;
     if (_state.routing || lastAt == null || route == null) return;
@@ -808,9 +814,19 @@ class ParkingMapController extends ChangeNotifier {
       highwayType: 'route',
       points: route.points,
     );
-    if (routeGeometry.distanceTo(position) < 60) {
+    // Seuil adaptatif : plus la mesure est imprécise, plus l'écart exigé est
+    // grand, pour ne pas rerouter sur du bruit GPS urbain.
+    final baseThreshold = 60.0;
+    final threshold = accuracyMeters == null
+        ? baseThreshold
+        : math.max(baseThreshold, accuracyMeters * 2.5);
+    if (routeGeometry.distanceTo(position) < threshold) {
+      _consecutiveOffRouteSamples = 0;
       return;
     }
+    _consecutiveOffRouteSamples++;
+    if (_consecutiveOffRouteSamples < _offRouteSamplesRequired) return;
+    _consecutiveOffRouteSamples = 0;
     unawaited(
       _loadRoute(
         origin: position,
