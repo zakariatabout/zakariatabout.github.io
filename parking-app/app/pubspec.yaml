@@ -35,7 +35,7 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   flutter_map: ^8.3.1
-  latlong2: ^0.10.1
+  latlong2: ">=0.9.1 <0.11.0"
   http: ^1.6.0
   geolocator: ^14.0.3
   shared_preferences: ^2.5.5
@@ -43,6 +43,7 @@ dependencies:
   timezone: ^0.11.1
   flutter_tts: ^4.2.5
   wakelock_plus: ^1.6.1
+  vector_map_tiles: 10.0.0-beta.2
 
 dev_dependencies:
   flutter_test:
