@@ -20,6 +20,8 @@ import '../services/paris_parking_service.dart';
 import '../services/paris_time.dart';
 import '../services/parking_eligibility_service.dart';
 import '../services/parking_session_store.dart';
+import '../services/probability_calibrator.dart';
+import '../services/probability_engine.dart';
 import '../services/route_progress_tracker.dart';
 import '../services/routing_service.dart';
 import '../services/search_outcome_store.dart';
@@ -41,6 +43,7 @@ class MapScreen extends StatefulWidget {
     this.locationService,
     this.parkingSessionStore,
     this.speechEngine,
+    this.calibrator,
   });
 
   final ParkingMapController? controller;
@@ -49,6 +52,11 @@ class MapScreen extends StatefulWidget {
 
   /// Moteur vocal injectable pour les tests (défaut : TTS de la plateforme).
   final SpeechEngine? speechEngine;
+
+  /// Calibrateur de probabilité appliqué au moteur de prédiction quand
+  /// l'écran construit son propre contrôleur (chargé par [CalibrationStore]
+  /// au démarrage). Ignoré si un contrôleur est injecté.
+  final ProbabilityCalibrator? calibrator;
 
   @override
   State<MapScreen> createState() => _MapScreenState();
@@ -133,6 +141,9 @@ class _MapScreenState extends State<MapScreen> {
           await community.reportOrThrow(type, position);
           return true;
         },
+        engine: ProbabilityEngine(
+          calibrator: widget.calibrator ?? const IdentityProbabilityCalibrator(),
+        ),
         communityPollInterval: AppConfig.communityPollInterval,
       );
     }

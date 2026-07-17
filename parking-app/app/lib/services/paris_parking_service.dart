@@ -3,6 +3,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../config.dart';
 import 'network_client.dart';
+import 'ttl_cache.dart';
 
 /// Régime d'une place de stationnement (règle d'usage).
 enum ParkingRegime {
@@ -71,18 +72,33 @@ class ParkingSpot {
 /// l'orchestration de production utilise [fetchSpotsOrThrow] afin qu'une panne
 /// de cet inventaire de régimes bloque les recommandations (fail-closed).
 class ParisParkingService {
-  ParisParkingService({http.Client? client, String? baseUrl, Duration? timeout})
-    : _baseUri = parseHttpEndpoint(
-        baseUrl ?? AppConfig.parisDataBaseUrl,
-        configName: 'PARIS_DATA_BASE_URL',
-      ),
-      _network = NetworkClient(
-        client: client,
-        timeout: timeout ?? AppConfig.networkTimeout,
-      );
+  ParisParkingService({
+    http.Client? client,
+    String? baseUrl,
+    Duration? timeout,
+    Duration cacheTtl = const Duration(hours: 6),
+    DateTime Function()? clock,
+  }) : _baseUri = parseHttpEndpoint(
+         baseUrl ?? AppConfig.parisDataBaseUrl,
+         configName: 'PARIS_DATA_BASE_URL',
+       ),
+       _network = NetworkClient(
+         client: client,
+         timeout: timeout ?? AppConfig.networkTimeout,
+       ),
+       _cache = TtlCache(ttl: cacheTtl, clock: clock);
 
   final Uri _baseUri;
   final NetworkClient _network;
+
+  /// Cache de réponses complètes : re-sélectionner la même destination ne
+  /// re-télécharge pas l'inventaire. La clé quantifie le centre à ~11 m pour
+  /// absorber le bruit de géocodage sans servir une zone différente.
+  final TtlCache<String, List<ParkingSpot>> _cache;
+
+  static String _cacheKey(LatLng center, int radiusMeters, int? maxRecords) =>
+      '${center.latitude.toStringAsFixed(4)},'
+      '${center.longitude.toStringAsFixed(4)},$radiusMeters,$maxRecords';
 
   static const _dataset = 'stationnement-voie-publique-emplacements';
 
@@ -129,6 +145,9 @@ class ParisParkingService {
         'radiusMeters, limit et maxRecords doivent être positifs',
       );
     }
+
+    final cacheKey = _cacheKey(center, radiusMeters, maxRecords);
+    if (_cache.get(cacheKey) case final cached?) return cached;
 
     final pageSize = limit.clamp(1, 100);
     final recordsUri = _baseUri.replace(
@@ -221,6 +240,9 @@ class ParisParkingService {
       if (totalCount != null && offset >= totalCount) break;
       if (maxRecords != null && offset >= maxRecords) break;
     }
+    // Seules les réponses complètes et valides sont mémorisées : une erreur
+    // relance toujours un vrai téléchargement (fail-closed inchangé).
+    _cache.set(cacheKey, List.unmodifiable(spots));
     return spots;
   }
 

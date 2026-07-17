@@ -76,19 +76,48 @@ class NetworkClient {
   NetworkClient({
     http.Client? client,
     this.timeout = const Duration(seconds: 30),
+    this.maxGetRetries = 2,
+    this.retryBaseDelay = const Duration(milliseconds: 400),
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null;
 
   final http.Client _client;
   final bool _ownsClient;
   final Duration timeout;
+
+  /// Nouvelles tentatives sur GET uniquement (idempotent) : timeout,
+  /// erreur de transport ou 5xx. Les POST ne sont jamais rejoués — un
+  /// signalement dupliqué serait pire qu'un signalement perdu.
+  final int maxGetRetries;
+  final Duration retryBaseDelay;
   bool _closed = false;
 
   bool get ownsClient => _ownsClient;
   bool get isClosed => _closed;
 
-  Future<http.Response> get(Uri uri, {Map<String, String>? headers}) =>
-      _execute('GET', uri, headers: headers);
+  Future<http.Response> get(Uri uri, {Map<String, String>? headers}) async {
+    var attempt = 0;
+    while (true) {
+      final delayBeforeRetry = retryBaseDelay * (1 << attempt);
+      try {
+        final response = await _execute('GET', uri, headers: headers);
+        if (response.statusCode >= 500 && attempt < maxGetRetries) {
+          attempt++;
+          await Future<void>.delayed(delayBeforeRetry);
+          continue;
+        }
+        return response;
+      } on NetworkTimeoutException {
+        if (attempt >= maxGetRetries) rethrow;
+        attempt++;
+        await Future<void>.delayed(delayBeforeRetry);
+      } on NetworkTransportException {
+        if (attempt >= maxGetRetries) rethrow;
+        attempt++;
+        await Future<void>.delayed(delayBeforeRetry);
+      }
+    }
+  }
 
   Future<http.Response> post(
     Uri uri, {

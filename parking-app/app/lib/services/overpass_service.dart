@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import '../config.dart';
 import '../models/street_segment.dart';
 import 'network_client.dart';
+import 'ttl_cache.dart';
 
 /// Récupère les tronçons de rue stationnables autour d'un point via
 /// l'API Overpass (OpenStreetMap).
@@ -13,14 +14,21 @@ class OverpassService {
     String? endpoint,
     String? fallbackEndpoint,
     Duration? timeout,
+    Duration cacheTtl = const Duration(hours: 24),
+    DateTime Function()? clock,
   }) : _endpoints = _buildEndpoints(endpoint, fallbackEndpoint),
        _network = NetworkClient(
          client: client,
          timeout: timeout ?? AppConfig.overpassTimeout,
-       );
+       ),
+       _cache = TtlCache(ttl: cacheTtl, clock: clock);
 
   final List<Uri> _endpoints;
   final NetworkClient _network;
+
+  /// La géométrie des rues bouge rarement : 24 h de cache évitent de
+  /// re-télécharger le réseau viaire à chaque re-sélection de destination.
+  final TtlCache<String, List<StreetSegment>> _cache;
 
   static const _noParkingValues = {
     'no_parking',
@@ -45,14 +53,21 @@ class OverpassService {
         radiusMeters > 2000) {
       throw ArgumentError('Centre ou rayon Overpass invalide');
     }
+    final cacheKey =
+        '${center.latitude.toStringAsFixed(4)},'
+        '${center.longitude.toStringAsFixed(4)},$radiusMeters';
+    if (_cache.get(cacheKey) case final cached?) return cached;
+
     NetworkException? lastError;
     for (final endpoint in _endpoints) {
       try {
-        return await _fetchSegmentsFrom(
+        final segments = await _fetchSegmentsFrom(
           endpoint,
           center,
           radiusMeters: radiusMeters,
         );
+        _cache.set(cacheKey, List.unmodifiable(segments));
+        return segments;
       } on NetworkException catch (error) {
         lastError = error;
       }
