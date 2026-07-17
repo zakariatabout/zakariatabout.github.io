@@ -1,14 +1,17 @@
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 
 import '../design_system/design_system.dart';
 
-/// Surface « verre dépoli » pour les éléments flottant au-dessus de la carte
+/// Surface flottante pour les éléments posés au-dessus de la carte
 /// (recherche, contrôles, légende) — le langage visuel Waze/Apple Maps.
 ///
-/// [enabled] permet de couper le flou en mode conduite : au volant, le
-/// contraste prime sur l'esthétique (contrainte de l'audit design).
+/// Volontairement SANS BackdropFilter : le flou d'arrière-plan bave hors de
+/// son clip sur iOS (Impeller) et assombrissait toute la carte. Une surface
+/// quasi opaque avec un fin liseré donne le même effet « carte flottante »
+/// sans artefact ni coût GPU.
+///
+/// [enabled] force une surface pleinement opaque en mode conduite : au
+/// volant, le contraste prime sur l'esthétique (contrainte de l'audit design).
 class ParkGlass extends StatelessWidget {
   const ParkGlass({
     super.key,
@@ -35,28 +38,22 @@ class ParkGlass extends StatelessWidget {
         child: child,
       );
     }
-    return ClipRRect(
+    return Material(
+      color: colors.mapControlSurface.withValues(alpha: 0.94),
+      elevation: elevation,
+      shadowColor: Colors.black38,
       borderRadius: borderRadius,
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(
-          sigmaX: ParkRadarBlur.glass,
-          sigmaY: ParkRadarBlur.glass,
-        ),
-        child: Material(
-          color: colors.mapControlSurface.withValues(alpha: 0.78),
-          elevation: 0,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: borderRadius,
-              border: Border.all(
-                color: Theme.of(context).colorScheme.outlineVariant.withValues(
-                  alpha: 0.4,
-                ),
-              ),
-            ),
-            child: child,
+      clipBehavior: Clip.antiAlias,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: borderRadius,
+          border: Border.all(
+            color: Theme.of(
+              context,
+            ).colorScheme.outlineVariant.withValues(alpha: 0.4),
           ),
         ),
+        child: child,
       ),
     );
   }
