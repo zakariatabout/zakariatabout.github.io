@@ -50,22 +50,37 @@ class AppConfig {
     'OSRM_DRIVING_BASE_URL',
     defaultValue: 'https://router.project-osrm.org/route/v1/driving',
   );
+  /// Template OSM « standard » (criard, très détaillé). Conservé comme
+  /// référence : quand il est actif, l'app applique un filtre de couleur
+  /// pour l'adoucir ; les fonds pré-stylés (CARTO, Stadia) n'en ont pas
+  /// besoin.
+  static const String osmStandardTileTemplate =
+      'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+
+  /// Fond minimaliste façon Waze : CARTO Positron (clair) / Dark Matter
+  /// (sombre) — uniquement rues et libellés, pas de bruit visuel. Convient à
+  /// l'usage de développement/test actuel ; pour une diffusion publique,
+  /// injecter un fournisseur contractuel (ex. Stadia avec clé gratuite) via
+  /// ces variables d'environnement.
   static const String mapTileUrlTemplate = String.fromEnvironment(
     'MAP_TILE_URL_TEMPLATE',
-    defaultValue: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    defaultValue:
+        'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
   );
 
-  /// Template dédié au thème sombre (ex. Stadia Alidade Smooth Dark, en paire
-  /// avec le clair). Vide = on réutilise le template clair.
+  /// Template dédié au thème sombre, en paire avec le clair.
+  /// Vide = on réutilise le template clair (assombri par filtre si OSM brut).
   static const String _mapTileUrlTemplateDark = String.fromEnvironment(
     'MAP_TILE_URL_TEMPLATE_DARK',
+    defaultValue:
+        'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
   );
   static String get mapTileUrlTemplateDark => _mapTileUrlTemplateDark.isEmpty
       ? mapTileUrlTemplate
       : _mapTileUrlTemplateDark;
   static const String mapTileAttribution = String.fromEnvironment(
     'MAP_TILE_ATTRIBUTION',
-    defaultValue: '© contributeurs OpenStreetMap',
+    defaultValue: '© OpenStreetMap · © CARTO',
   );
 
   static const int networkTimeoutSeconds = int.fromEnvironment(

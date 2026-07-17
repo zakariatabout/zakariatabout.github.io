@@ -822,9 +822,13 @@ class _MapScreenState extends State<MapScreen>
     // clair OSM quand l'env est vide — cas prod).
     final hasNativeDarkTiles =
         AppConfig.mapTileUrlTemplateDark != AppConfig.mapTileUrlTemplate;
+    // Le filtre d'adoucissement clair ne vaut que pour l'OSM standard : les
+    // fonds pré-stylés (CARTO/Stadia) sont déjà propres.
+    final osmStandardLight =
+        AppConfig.mapTileUrlTemplate == AppConfig.osmStandardTileTemplate;
     final ColorFilter? tileFilter = isDark
         ? (hasNativeDarkTiles ? null : ParkRadarMapFilters.dark)
-        : ParkRadarMapFilters.light;
+        : (osmStandardLight ? ParkRadarMapFilters.light : null);
     final tileLayer = TileLayer(
       urlTemplate: isDark
           ? AppConfig.mapTileUrlTemplateDark
@@ -846,12 +850,16 @@ class _MapScreenState extends State<MapScreen>
         minZoom: 11,
         maxZoom: 20,
         // Peint par FlutterMap SOUS les children, donc HORS du ColorFiltered :
-        // couleur POST-filtre du fond de plan pour éviter tout flash.
-        backgroundColor: isDark && hasNativeDarkTiles
-            ? Theme.of(context).colorScheme.surfaceContainer
-            : (isDark
-                  ? ParkRadarMapFilters.darkBackdrop
-                  : ParkRadarMapFilters.lightBackdrop),
+        // couleur assortie au fond réel des tuiles pour éviter tout flash.
+        backgroundColor: isDark
+            ? (hasNativeDarkTiles
+                  // Fond de plan CARTO Dark Matter (~noir neutre).
+                  ? const Color(0xFF0E1214)
+                  : ParkRadarMapFilters.darkBackdrop)
+            : (osmStandardLight
+                  ? ParkRadarMapFilters.lightBackdrop
+                  // Fond de plan CARTO Positron (blanc cassé).
+                  : const Color(0xFFFAFAF8)),
         onMapReady: _onMapReady,
         onTap: (_, _) {
           _searchFocusNode.unfocus();
@@ -2911,8 +2919,14 @@ class _MapAttribution extends StatelessWidget {
                       horizontal: ParkRadarSpacing.xs,
                       vertical: ParkRadarSpacing.xxs,
                     ),
+                    // widthFactor/heightFactor OBLIGATOIRES : sans eux, cet
+                    // Align s'étire au maximum disponible et le fond sombre du
+                    // bouton recouvrait 320 pt x toute la hauteur de la carte
+                    // (le « voile » constaté sur iPhone).
                     child: Align(
                       alignment: Alignment.centerLeft,
+                      widthFactor: 1,
+                      heightFactor: 1,
                       child: Text(
                         label,
                         style: Theme.of(context).textTheme.labelSmall,

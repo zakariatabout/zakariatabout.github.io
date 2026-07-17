@@ -180,7 +180,7 @@ void main() {
           .getSize(
             find
                 .ancestor(
-                  of: find.textContaining('contributeurs OpenStreetMap'),
+                  of: find.textContaining('OpenStreetMap'),
                   matching: find.byType(InkWell),
                 )
                 .first,
