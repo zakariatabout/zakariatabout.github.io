@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -890,6 +891,36 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
+    if (state.parkedPosition case final parked?) {
+      markers.add(
+        Marker(
+          point: parked,
+          width: 44,
+          height: 44,
+          child: Semantics(
+            label: 'Votre voiture est garée ici',
+            child: ExcludeSemantics(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: colors.brand,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 4),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.directions_car,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     if (mode != _MapLayerMode.legal && state.loop != null) {
       for (final (index, scored) in state.loop!.orderedSegments.indexed) {
         final level = _availabilityLevel(scored.probabilityFree);
@@ -1018,12 +1049,70 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ],
+                if (state.parkedPosition != null) ...[
+                  Divider(
+                    height: 1,
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                  IconButton(
+                    onPressed: _findMyCar,
+                    tooltip: 'Retrouver ma voiture',
+                    color: colors.brand,
+                    constraints: const BoxConstraints.tightFor(
+                      width: ParkRadarSizes.minimumTouchTarget,
+                      height: ParkRadarSizes.minimumTouchTarget,
+                    ),
+                    icon: const Icon(Icons.directions_car),
+                  ),
+                ],
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  /// Recentre la carte sur la place mémorisée et annonce la distance et la
+  /// direction à pied depuis la position courante. Réutilise la « session
+  /// garée » déjà persistée par [_reportParked].
+  void _findMyCar() {
+    final state = _controller.state;
+    final parked = state.parkedPosition;
+    if (parked == null) return;
+    if (_mapReady) _mapController.move(parked, 17);
+    final user = state.userPosition;
+    if (user == null) {
+      _showSnack(
+        'Voiture garée ici. Activez votre position pour connaître la distance.',
+      );
+      return;
+    }
+    final meters = _distance(user, parked);
+    _showSnack('Voiture à ${_formatDistance(meters)} ${_bearingLabel(user, parked)} (à pied).');
+  }
+
+  /// Direction cardinale approximative de [from] vers [to] (8 secteurs).
+  String _bearingLabel(LatLng from, LatLng to) {
+    final dLon = (to.longitude - from.longitude) * math.pi / 180;
+    final lat1 = from.latitude * math.pi / 180;
+    final lat2 = to.latitude * math.pi / 180;
+    final y = math.sin(dLon) * math.cos(lat2);
+    final x =
+        math.cos(lat1) * math.sin(lat2) -
+        math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
+    final degrees = (math.atan2(y, x) * 180 / math.pi + 360) % 360;
+    const labels = [
+      'au nord',
+      'au nord-est',
+      'à l’est',
+      'au sud-est',
+      'au sud',
+      'au sud-ouest',
+      'à l’ouest',
+      'au nord-ouest',
+    ];
+    return labels[(((degrees + 22.5) ~/ 45) % 8).toInt()];
   }
 
   Widget _buildTopOverlay(ParkingMapState state, _MapLayerMode mode) {
