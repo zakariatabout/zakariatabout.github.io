@@ -115,7 +115,8 @@ class _ParkTrustChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final visibleLabel = detail == null ? label : '$label · $detail';
+    // Hiérarchie interne : libellé en semi-gras, détail atténué. Le texte à
+    // plat reste « label · détail » (compatible find.textContaining).
     return Semantics(
       container: true,
       label: semanticLabel,
@@ -123,32 +124,42 @@ class _ParkTrustChip extends StatelessWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: tone.background,
-            border: Border.all(color: tone.border),
+            border: Border.all(color: tone.border.withValues(alpha: 0.6)),
             borderRadius: ParkRadarRadii.pill,
           ),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 32),
+            constraints: const BoxConstraints(minHeight: 36),
             child: Padding(
               padding: const EdgeInsets.symmetric(
-                horizontal: ParkRadarSpacing.sm,
-                vertical: ParkRadarSpacing.xxs,
+                horizontal: ParkRadarSpacing.sm + 2,
+                vertical: 6,
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(
-                    icon,
-                    size: ParkRadarSizes.compactIcon,
-                    color: tone.foreground,
-                  ),
+                  Icon(icon, size: 16, color: tone.foreground),
                   const SizedBox(width: ParkRadarSpacing.xs),
                   Flexible(
-                    child: Text(
-                      visibleLabel,
+                    child: Text.rich(
+                      TextSpan(
+                        text: label,
+                        style: Theme.of(context).textTheme.labelMedium
+                            ?.copyWith(
+                              color: tone.foreground,
+                              fontWeight: FontWeight.w600,
+                            ),
+                        children: [
+                          if (detail != null)
+                            TextSpan(
+                              text: ' · $detail',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w400,
+                                color: tone.foreground.withValues(alpha: 0.85),
+                              ),
+                            ),
+                        ],
+                      ),
                       softWrap: true,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.labelMedium?.copyWith(color: tone.foreground),
                     ),
                   ),
                 ],

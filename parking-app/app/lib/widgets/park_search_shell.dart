@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 
 import '../design_system/design_system.dart';
 
-/// Recherche de destination prête à être posée au-dessus d'une carte.
+/// Recherche de destination flottante façon Waze : pilule compacte posée sur
+/// la carte, hint seul (pas de floating label Material), loupe teintée marque
+/// et anneau de focus animé.
 ///
-/// Le composant borne sa largeur sur grand écran, conserve une cible tactile de
-/// 48 dp et expose explicitement les états de chargement et d'effacement aux
-/// technologies d'assistance.
-class ParkSearchShell extends StatelessWidget {
+/// Pas de BackdropFilter ici : le flou d'arrière-plan bave hors de son clip
+/// sur iOS (Impeller) et voilait la carte entière.
+class ParkSearchShell extends StatefulWidget {
   const ParkSearchShell({
     super.key,
     required this.controller,
@@ -43,97 +44,241 @@ class ParkSearchShell extends StatelessWidget {
   final double maxWidth;
   final double suggestionsMaxHeight;
 
+  @override
+  State<ParkSearchShell> createState() => _ParkSearchShellState();
+}
+
+class _ParkSearchShellState extends State<ParkSearchShell> {
+  FocusNode? _internalFocusNode;
+  bool _focused = false;
+
+  FocusNode get _focusNode =>
+      widget.focusNode ??
+      (_internalFocusNode ??= FocusNode(debugLabel: 'ParkSearchShell'));
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(_handleFocusChange);
+    _focused = _focusNode.hasFocus;
+  }
+
+  @override
+  void didUpdateWidget(ParkSearchShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode != widget.focusNode) {
+      (oldWidget.focusNode ?? _internalFocusNode)?.removeListener(
+        _handleFocusChange,
+      );
+      _focusNode.addListener(_handleFocusChange);
+      _focused = _focusNode.hasFocus;
+    }
+  }
+
+  @override
+  void dispose() {
+    (widget.focusNode ?? _internalFocusNode)?.removeListener(
+      _handleFocusChange,
+    );
+    _internalFocusNode?.dispose();
+    super.dispose();
+  }
+
+  void _handleFocusChange() {
+    final focused = _focusNode.hasFocus;
+    if (focused != _focused) setState(() => _focused = focused);
+  }
+
   void _clear() {
-    controller.clear();
-    onChanged?.call('');
-    onClear?.call();
-    focusNode?.requestFocus();
+    widget.controller.clear();
+    widget.onChanged?.call('');
+    widget.onClear?.call();
+    _focusNode.requestFocus();
   }
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final colors = context.parkRadarColors;
+    final dark = theme.brightness == Brightness.dark;
 
-    // Pas de BackdropFilter ici : le flou d'arrière-plan bave hors de son
-    // clip sur iOS (Impeller) et voilait la carte entière.
+    final surface = dark
+        ? ParkRadarSearchPalette.surfaceDark
+        : ParkRadarSearchPalette.surfaceLight;
+    final hintColor = dark
+        ? ParkRadarSearchPalette.hintDark
+        : ParkRadarSearchPalette.hintLight;
+    final hairline = dark
+        ? ParkRadarSearchPalette.hairlineDark
+        : ParkRadarSearchPalette.hairlineLight;
+
     return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Material(
-        color: scheme.surface.withValues(alpha: 0.96),
-        surfaceTintColor: Colors.transparent,
-        elevation: 4,
-        shadowColor: Colors.black38,
-        borderRadius: ParkRadarRadii.card,
-        clipBehavior: Clip.antiAlias,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ValueListenableBuilder<TextEditingValue>(
-              valueListenable: controller,
-              builder: (context, value, _) {
-                return TextField(
-                  controller: controller,
-                  focusNode: focusNode,
-                  enabled: enabled,
-                  autofocus: autofocus,
-                  onChanged: onChanged,
-                  onSubmitted: onSubmitted,
-                  textInputAction: TextInputAction.search,
-                  keyboardType: TextInputType.streetAddress,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: InputDecoration(
-                    labelText: label,
-                    hintText: hint,
-                    prefixIcon: const ExcludeSemantics(
-                      child: Icon(Icons.search),
-                    ),
-                    suffixIcon: isLoading
-                        ? Semantics(
-                            liveRegion: true,
-                            label: loadingLabel,
-                            child: const Padding(
-                              padding: EdgeInsets.all(ParkRadarSpacing.sm),
-                              child: SizedBox.square(
-                                dimension: ParkRadarSizes.icon,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              ),
-                            ),
-                          )
-                        : value.text.isNotEmpty
-                        ? IconButton(
-                            onPressed: enabled ? _clear : null,
-                            tooltip: clearTooltip,
-                            icon: const Icon(Icons.close),
-                          )
-                        : null,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    disabledBorder: InputBorder.none,
-                    errorBorder: InputBorder.none,
-                    focusedErrorBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: ParkRadarSpacing.md,
-                      vertical: ParkRadarSpacing.sm,
-                    ),
-                    constraints: const BoxConstraints(
-                      minHeight: ParkRadarSizes.searchFieldHeight,
-                    ),
-                  ),
-                );
-              },
-            ),
-            if (suggestions != null) ...[
-              Divider(color: scheme.outlineVariant),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: suggestionsMaxHeight),
-                child: suggestions!,
+      constraints: BoxConstraints(maxWidth: widget.maxWidth),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Label « visuellement masqué » : conserve le texte « Destination »
+          // dans l'arbre (tests find.text) sans floating label Material.
+          // Opacity + SizedBox(height: 0), surtout pas Offstage : les finders
+          // sautent les widgets offstage (skipOffstage: true par défaut).
+          // Le rôle accessible est porté par le Semantics(label:) ci-dessous.
+          ExcludeSemantics(
+            child: Opacity(
+              opacity: 0,
+              child: SizedBox(
+                height: 0,
+                child: Text(
+                  widget.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.clip,
+                ),
               ),
-            ],
+            ),
+          ),
+          AnimatedContainer(
+            duration: ParkRadarMotion.standard,
+            curve: ParkRadarMotion.enter,
+            decoration: BoxDecoration(
+              borderRadius: ParkRadarRadii.searchPill,
+              boxShadow: [
+                BoxShadow(
+                  color: dark
+                      ? ParkRadarSearchPalette.shadowDark
+                      : ParkRadarSearchPalette.shadowLight,
+                  blurRadius: _focused ? 28 : 18,
+                  offset: Offset(0, _focused ? 10 : 6),
+                ),
+              ],
+            ),
+            child: Material(
+              color: surface,
+              surfaceTintColor: Colors.transparent,
+              clipBehavior: Clip.antiAlias,
+              shape: RoundedRectangleBorder(
+                borderRadius: ParkRadarRadii.searchPill,
+                side: BorderSide(
+                  color: _focused ? colors.brand : hairline,
+                  width: _focused ? 1.5 : 1,
+                ),
+              ),
+              child: Semantics(
+                container: true,
+                label: widget.label,
+                child: ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: widget.controller,
+                  builder: (context, value, _) {
+                    return TextField(
+                      controller: widget.controller,
+                      focusNode: _focusNode,
+                      enabled: widget.enabled,
+                      autofocus: widget.autofocus,
+                      onChanged: widget.onChanged,
+                      onSubmitted: widget.onSubmitted,
+                      textInputAction: TextInputAction.search,
+                      keyboardType: TextInputType.streetAddress,
+                      textCapitalization: TextCapitalization.words,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: -0.2,
+                        color: scheme.onSurface,
+                      ),
+                      decoration: InputDecoration(
+                        // Hint seul, jamais de labelText : pas de floating
+                        // label Material dans la pilule.
+                        hintText: widget.hint,
+                        hintStyle: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w400,
+                          letterSpacing: -0.2,
+                          color: hintColor,
+                        ),
+                        // Neutralise le InputDecorationTheme global
+                        // (filled: true + OutlineInputBorder).
+                        filled: false,
+                        fillColor: Colors.transparent,
+                        prefixIcon: ExcludeSemantics(
+                          child: Icon(
+                            Icons.search,
+                            size: 22,
+                            color: _focused ? colors.brand : hintColor,
+                          ),
+                        ),
+                        suffixIcon: widget.isLoading
+                            ? Semantics(
+                                liveRegion: true,
+                                label: widget.loadingLabel,
+                                child: const Padding(
+                                  padding: EdgeInsets.all(ParkRadarSpacing.sm),
+                                  child: SizedBox.square(
+                                    dimension: ParkRadarSizes.compactIcon,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            : value.text.isNotEmpty
+                            ? IconButton(
+                                onPressed: widget.enabled ? _clear : null,
+                                tooltip: widget.clearTooltip,
+                                iconSize: 20,
+                                color: hintColor,
+                                icon: const Icon(Icons.close),
+                              )
+                            : null,
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                        disabledBorder: InputBorder.none,
+                        errorBorder: InputBorder.none,
+                        focusedErrorBorder: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: ParkRadarSpacing.xxs,
+                          vertical: ParkRadarSpacing.sm,
+                        ),
+                        constraints: const BoxConstraints(
+                          minHeight: ParkRadarSizes.searchPillHeight,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+          // Suggestions : carte détachée sous la pilule (façon dropdown Waze),
+          // jamais fusionnée avec la pilule pour garder le rayon 26 intact.
+          if (widget.suggestions != null) ...[
+            const SizedBox(height: ParkRadarSpacing.xs),
+            Material(
+              color: surface,
+              surfaceTintColor: Colors.transparent,
+              elevation: 12,
+              shadowColor: dark
+                  ? ParkRadarSearchPalette.shadowDark
+                  : ParkRadarSearchPalette.shadowLight,
+              clipBehavior: Clip.antiAlias,
+              shape: RoundedRectangleBorder(
+                borderRadius: ParkRadarRadii.card,
+                side: BorderSide(color: hairline),
+              ),
+              child: AnimatedSize(
+                duration: ParkRadarMotion.standard,
+                curve: ParkRadarMotion.enter,
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: widget.suggestionsMaxHeight,
+                  ),
+                  child: widget.suggestions!,
+                ),
+              ),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }

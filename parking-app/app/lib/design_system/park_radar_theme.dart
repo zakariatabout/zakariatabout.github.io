@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'park_radar_tokens.dart';
@@ -20,58 +21,84 @@ abstract final class ParkRadarTheme {
     final isDark = brightness == Brightness.dark;
     final scheme =
         ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0D47A1),
+          seedColor: const Color(0xFF2563EB),
           brightness: brightness,
         ).copyWith(
-          primary: isDark ? const Color(0xFFA8C7FA) : const Color(0xFF0D47A1),
-          onPrimary: isDark ? const Color(0xFF062E6F) : Colors.white,
+          primary: isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB),
+          onPrimary: isDark ? const Color(0xFF172554) : Colors.white,
           primaryContainer: isDark
-              ? const Color(0xFF123A73)
-              : const Color(0xFFD8E6FF),
+              ? const Color(0xFF1E3A8A)
+              : const Color(0xFFDBEAFE),
           onPrimaryContainer: isDark
-              ? const Color(0xFFD7E3FF)
-              : const Color(0xFF001A41),
-          secondary: isDark ? const Color(0xFF7EE7D1) : const Color(0xFF00695C),
-          onSecondary: isDark ? const Color(0xFF003731) : Colors.white,
+              ? const Color(0xFFDBEAFE)
+              : const Color(0xFF1E3A8A),
+          secondary: isDark ? const Color(0xFF4ADE80) : const Color(0xFF16A34A),
+          onSecondary: isDark ? const Color(0xFF052E16) : Colors.white,
           secondaryContainer: isDark
-              ? const Color(0xFF074C43)
-              : const Color(0xFFDDF7F0),
+              ? const Color(0xFF14532D)
+              : const Color(0xFFDCFCE7),
           onSecondaryContainer: isDark
-              ? const Color(0xFFA7F2E2)
-              : const Color(0xFF00201B),
-          error: isDark ? const Color(0xFFFFB4AB) : const Color(0xFFB42318),
-          onError: isDark ? const Color(0xFF690005) : Colors.white,
+              ? const Color(0xFFBBF7D0)
+              : const Color(0xFF14532D),
+          error: isDark ? const Color(0xFFF97066) : const Color(0xFFD92D20),
+          onError: isDark ? const Color(0xFF450A0A) : Colors.white,
           errorContainer: isDark
-              ? const Color(0xFF5A1A17)
-              : const Color(0xFFFDECEC),
+              ? const Color(0xFF4C1512)
+              : const Color(0xFFFEE4E2),
           onErrorContainer: isDark
-              ? const Color(0xFFFFDAD6)
-              : const Color(0xFF601410),
-          surface: isDark ? const Color(0xFF111827) : Colors.white,
-          onSurface: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF101828),
+              ? const Color(0xFFFECDCA)
+              : const Color(0xFF7A271A),
+          surface: isDark ? const Color(0xFF0F172A) : Colors.white,
+          onSurface: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0F172A),
           onSurfaceVariant: isDark
-              ? const Color(0xFFD0D5DD)
-              : const Color(0xFF475467),
-          outline: isDark ? const Color(0xFF98A2B3) : const Color(0xFF667085),
+              ? const Color(0xFFCBD5E1)
+              : const Color(0xFF475569),
+          // Rampe ardoise complète : map_screen lit surfaceContainer et le
+          // chipTheme lit surfaceContainerHighest — sans overrides, fromSeed
+          // injecte des gris M3 teintés hors palette.
+          surfaceDim: isDark ? const Color(0xFF0B1220) : const Color(0xFFEDE9E1),
+          surfaceBright: isDark ? const Color(0xFF334155) : Colors.white,
+          surfaceContainerLowest: isDark
+              ? const Color(0xFF0B1220)
+              : Colors.white,
+          surfaceContainerLow: isDark
+              ? const Color(0xFF131E33)
+              : const Color(0xFFFAF7F2),
+          surfaceContainer: isDark
+              ? const Color(0xFF16223A)
+              : const Color(0xFFF4F0E9),
+          surfaceContainerHigh: isDark
+              ? const Color(0xFF1E293B)
+              : const Color(0xFFEDE9E1),
+          surfaceContainerHighest: isDark
+              ? const Color(0xFF243247)
+              : const Color(0xFFE6E1D8),
+          // Outline plus clair en sombre : #64748B fixe ferait chuter les
+          // bordures à 3,7:1 la nuit (6:1 avec #94A3B8).
+          outline: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
           outlineVariant: isDark
-              ? const Color(0xFF475467)
-              : const Color(0xFFD0D5DD),
+              ? const Color(0xFF334155)
+              : const Color(0xFFCBD5E1),
           inverseSurface: isDark
               ? const Color(0xFFF8FAFC)
-              : const Color(0xFF1D2939),
+              : const Color(0xFF1E293B),
           onInverseSurface: isDark
-              ? const Color(0xFF1D2939)
+              ? const Color(0xFF0F172A)
               : const Color(0xFFF8FAFC),
           inversePrimary: isDark
-              ? const Color(0xFF0D47A1)
-              : const Color(0xFFA8C7FA),
+              ? const Color(0xFF2563EB)
+              : const Color(0xFF60A5FA),
+          surfaceTint: Colors.transparent,
         );
 
     final base = ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: scheme,
-      fontFamily: 'Roboto',
+      // iOS/Android : null => police système (.SF Pro Text/Display sur iOS).
+      // Web : garder la Roboto embarquée pour éviter le fallback réseau
+      // fonts.gstatic.com.
+      fontFamily: kIsWeb ? 'Roboto' : null,
       materialTapTargetSize: MaterialTapTargetSize.padded,
       visualDensity: VisualDensity.standard,
       extensions: [semanticColors],
@@ -80,8 +107,8 @@ abstract final class ParkRadarTheme {
 
     return base.copyWith(
       scaffoldBackgroundColor: isDark
-          ? const Color(0xFF0B1220)
-          : const Color(0xFFF4F7FB),
+          ? const Color(0xFF0B1220) // cran le plus profond de la rampe
+          : const Color(0xFFFAF7F2), // crème de marque
       textTheme: textTheme,
       primaryTextTheme: textTheme,
       iconTheme: IconThemeData(color: scheme.onSurface, size: 24),
@@ -140,10 +167,11 @@ abstract final class ParkRadarTheme {
           padding: const WidgetStatePropertyAll(
             EdgeInsets.symmetric(horizontal: ParkRadarSpacing.lg),
           ),
-          shape: const WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: ParkRadarRadii.control),
+          shape: const WidgetStatePropertyAll(StadiumBorder()),
+          elevation: const WidgetStatePropertyAll(0),
+          textStyle: WidgetStatePropertyAll(
+            textTheme.labelLarge?.copyWith(fontSize: 16, letterSpacing: 0.2),
           ),
-          textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -157,9 +185,7 @@ abstract final class ParkRadarTheme {
           padding: const WidgetStatePropertyAll(
             EdgeInsets.symmetric(horizontal: ParkRadarSpacing.md),
           ),
-          shape: const WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: ParkRadarRadii.control),
-          ),
+          shape: const WidgetStatePropertyAll(StadiumBorder()),
           side: WidgetStatePropertyAll(BorderSide(color: scheme.outline)),
           textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
         ),
@@ -267,75 +293,87 @@ abstract final class ParkRadarTheme {
     return base.copyWith(
       displayLarge: base.displayLarge?.copyWith(
         color: scheme.onSurface,
-        fontSize: 32,
-        height: 1.20,
-        fontWeight: FontWeight.w700,
+        fontSize: 34,
+        height: 1.15,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.7,
       ),
       headlineLarge: base.headlineLarge?.copyWith(
         color: scheme.onSurface,
         fontSize: 28,
-        height: 1.25,
-        fontWeight: FontWeight.w700,
+        height: 1.20,
+        fontWeight: FontWeight.w800,
+        letterSpacing: -0.5,
       ),
       headlineMedium: base.headlineMedium?.copyWith(
         color: scheme.onSurface,
         fontSize: 24,
-        height: 1.30,
+        height: 1.25,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.4,
       ),
       titleLarge: base.titleLarge?.copyWith(
         color: scheme.onSurface,
         fontSize: 22,
-        height: 1.30,
+        height: 1.25,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.35,
       ),
       titleMedium: base.titleMedium?.copyWith(
         color: scheme.onSurface,
         fontSize: 18,
-        height: 1.35,
+        height: 1.30,
         fontWeight: FontWeight.w700,
+        letterSpacing: -0.25,
       ),
       titleSmall: base.titleSmall?.copyWith(
         color: scheme.onSurface,
         fontSize: 16,
-        height: 1.40,
-        fontWeight: FontWeight.w500,
+        height: 1.35,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -0.15,
       ),
       bodyLarge: base.bodyLarge?.copyWith(
         color: scheme.onSurface,
         fontSize: 17,
-        height: 1.50,
+        height: 1.45,
         fontWeight: FontWeight.w400,
+        letterSpacing: -0.2,
       ),
       bodyMedium: base.bodyMedium?.copyWith(
         color: scheme.onSurface,
-        fontSize: 16,
-        height: 1.50,
+        fontSize: 15,
+        height: 1.45,
         fontWeight: FontWeight.w400,
+        letterSpacing: -0.1,
       ),
       bodySmall: base.bodySmall?.copyWith(
         color: scheme.onSurfaceVariant,
-        fontSize: 14,
-        height: 1.45,
+        fontSize: 13,
+        height: 1.40,
         fontWeight: FontWeight.w400,
+        letterSpacing: 0,
       ),
       labelLarge: base.labelLarge?.copyWith(
         color: scheme.onSurface,
-        fontSize: 15,
-        height: 1.35,
-        fontWeight: FontWeight.w700,
+        fontSize: 16,
+        height: 1.30,
+        fontWeight: FontWeight.w600,
+        letterSpacing: -0.1,
       ),
       labelMedium: base.labelMedium?.copyWith(
         color: scheme.onSurface,
-        fontSize: 14,
-        height: 1.35,
-        fontWeight: FontWeight.w500,
+        fontSize: 13,
+        height: 1.30,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0,
       ),
       labelSmall: base.labelSmall?.copyWith(
         color: scheme.onSurfaceVariant,
-        fontSize: 12,
-        height: 1.35,
-        fontWeight: FontWeight.w500,
+        fontSize: 11,
+        height: 1.30,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.2,
       ),
     );
   }

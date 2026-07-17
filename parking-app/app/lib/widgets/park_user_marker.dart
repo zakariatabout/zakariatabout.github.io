@@ -30,7 +30,7 @@ class _ParkUserMarkerState extends State<ParkUserMarker>
     super.initState();
     _pulse = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1800),
+      duration: const Duration(milliseconds: 2400),
     );
   }
 
@@ -57,20 +57,25 @@ class _ParkUserMarkerState extends State<ParkUserMarker>
         if (!reduceMotion)
           AnimatedBuilder(
             animation: _pulse,
-            builder: (context, _) {
-              final t = Curves.easeOut.transform(_pulse.value);
+            // Ring construit UNE fois : le builder ne recompose plus que
+            // Opacity + Transform.scale à chaque frame.
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: colors.route, width: 3),
+              ),
+              child: const SizedBox.square(dimension: 44),
+            ),
+            builder: (context, ring) {
+              // Pulsation sur 65 % du cycle, repos (invisible) sur le reste.
+              final t = const Interval(
+                0,
+                0.65,
+                curve: Curves.easeOut,
+              ).transform(_pulse.value);
               return Opacity(
                 opacity: (1 - t) * 0.35,
-                child: Transform.scale(
-                  scale: 0.6 + t * 1.4,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: colors.route, width: 3),
-                    ),
-                    child: const SizedBox.square(dimension: 44),
-                  ),
-                ),
+                child: Transform.scale(scale: 0.6 + t * 1.4, child: ring),
               );
             },
           ),

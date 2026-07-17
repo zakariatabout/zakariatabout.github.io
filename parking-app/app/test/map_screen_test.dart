@@ -172,7 +172,7 @@ void main() {
     expect(find.text('Destination'), findsOneWidget);
     expect(find.byTooltip('Afficher ma position'), findsOneWidget);
     expect(
-      tester.getSize(find.byTooltip('Zoomer')).width,
+      tester.getSize(find.byTooltip('Afficher ma position')).width,
       ParkRadarSizes.minimumTouchTarget,
     );
     expect(

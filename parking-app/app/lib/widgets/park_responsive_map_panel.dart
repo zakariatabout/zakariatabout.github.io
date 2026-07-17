@@ -91,24 +91,78 @@ class ParkMapPanelSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final borderRadius = placement == ParkMapPanelPlacement.bottom
-        ? ParkRadarRadii.topPanel
-        : ParkRadarRadii.panel;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final isBottom = placement == ParkMapPanelPlacement.bottom;
+    final borderRadius = isBottom ? ParkRadarRadii.sheet : ParkRadarRadii.panel;
 
-    return Material(
-      color: scheme.surface,
-      surfaceTintColor: Colors.transparent,
-      elevation: 6,
-      shadowColor: Colors.black.withValues(
-        alpha: Theme.of(context).brightness == Brightness.dark ? 0.48 : 0.20,
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: borderRadius,
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: isDark
+              // surfaceContainerHigh -> surfaceContainerLow de la rampe ardoise.
+              ? const [Color(0xFF1E293B), Color(0xFF131E33)]
+              // Blanc -> crème de marque.
+              : const [Color(0xFFFFFFFF), Color(0xFFFAF7F2)],
+        ),
+        border: Border.all(
+          color: isDark
+              ? Colors.white.withValues(alpha: 0.08)
+              : const Color(0xFFE4E7EC),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.50 : 0.16),
+            blurRadius: 28,
+            offset: const Offset(0, 10),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.08),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
-      borderRadius: borderRadius,
-      clipBehavior: Clip.antiAlias,
-      child: SingleChildScrollView(
-        controller: scrollController,
-        padding: const EdgeInsets.all(ParkRadarSpacing.md),
-        child: child,
+      child: ClipRRect(
+        borderRadius: borderRadius,
+        child: Material(
+          type: MaterialType.transparency,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isBottom)
+                Padding(
+                  padding: const EdgeInsets.only(top: ParkRadarSpacing.xs),
+                  child: Container(
+                    width: ParkRadarSizes.grabHandleWidth,
+                    height: ParkRadarSizes.grabHandleHeight,
+                    decoration: BoxDecoration(
+                      color: scheme.outlineVariant.withValues(
+                        alpha: isDark ? 0.9 : 0.8,
+                      ),
+                      borderRadius: ParkRadarRadii.pill,
+                    ),
+                  ),
+                ),
+              Flexible(
+                child: SingleChildScrollView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.fromLTRB(
+                    ParkRadarSpacing.md,
+                    ParkRadarSpacing.sm,
+                    ParkRadarSpacing.md,
+                    ParkRadarSpacing.md,
+                  ),
+                  child: child,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -131,12 +185,15 @@ class ParkMapOverlayShell extends StatelessWidget {
       builder: (context, constraints) {
         final horizontal = constraints.maxWidth >= ParkRadarBreakpoints.desktop
             ? ParkRadarSpacing.lg
-            : ParkRadarSpacing.sm;
+            // 16 dp : la pilule flotte, elle ne touche plus les bords.
+            : ParkRadarSpacing.md;
         return SafeArea(
           bottom: false,
-          minimum: EdgeInsets.symmetric(
-            horizontal: horizontal,
-            vertical: ParkRadarSpacing.sm,
+          minimum: EdgeInsets.only(
+            left: horizontal,
+            right: horizontal,
+            top: ParkRadarSpacing.xs, // 8 dp sous la status bar, façon Waze
+            bottom: ParkRadarSpacing.sm,
           ),
           child: Align(
             alignment: Alignment.topCenter,
