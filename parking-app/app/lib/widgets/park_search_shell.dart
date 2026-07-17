@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import '../design_system/design_system.dart';
@@ -56,16 +58,20 @@ class ParkSearchShell extends StatelessWidget {
 
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Material(
-        color: scheme.surface,
-        surfaceTintColor: Colors.transparent,
-        elevation: 4,
-        shadowColor: Colors.black.withValues(
-          alpha: Theme.of(context).brightness == Brightness.dark ? 0.42 : 0.18,
-        ),
+      child: ClipRRect(
         borderRadius: ParkRadarRadii.card,
-        clipBehavior: Clip.antiAlias,
-        child: Column(
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(
+            sigmaX: ParkRadarBlur.glass,
+            sigmaY: ParkRadarBlur.glass,
+          ),
+          child: Material(
+            color: scheme.surface.withValues(alpha: 0.88),
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            borderRadius: ParkRadarRadii.card,
+            clipBehavior: Clip.antiAlias,
+            child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ValueListenableBuilder<TextEditingValue>(
@@ -133,6 +139,8 @@ class ParkSearchShell extends StatelessWidget {
               ),
             ],
           ],
+            ),
+          ),
         ),
       ),
     );

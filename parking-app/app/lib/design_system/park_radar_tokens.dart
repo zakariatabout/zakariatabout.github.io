@@ -290,6 +290,11 @@ abstract final class ParkRadarRadii {
   static const BorderRadius pill = BorderRadius.all(Radius.circular(999));
 }
 
+/// Intensités de flou des surfaces « verre dépoli ».
+abstract final class ParkRadarBlur {
+  static const double glass = 14;
+}
+
 abstract final class ParkRadarMotion {
   static const Duration feedback = Duration(milliseconds: 120);
   static const Duration standard = Duration(milliseconds: 200);

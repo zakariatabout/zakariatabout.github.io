@@ -92,6 +92,9 @@ class _MapScreenState extends State<MapScreen>
   final _routeProgressTracker = RouteProgressTracker();
   int _guidanceStepIndex = 0;
   RouteProgressSnapshot? _guidanceSnapshot;
+  LocationSample? _lastSample;
+  bool _celebrating = false;
+  Timer? _celebrationTimer;
   late final VoiceGuidanceService _voiceGuidance;
   bool _voiceMuted = false;
   bool _cameraFollowing = true;
@@ -167,6 +170,7 @@ class _MapScreenState extends State<MapScreen>
     _controller.removeListener(_handleControllerChanged);
     _trackingGeneration++;
     _gpsRetryTimer?.cancel();
+    _celebrationTimer?.cancel();
     _camera.dispose();
     unawaited(WakelockPlus.disable());
     unawaited(_voiceGuidance.dispose());
@@ -386,6 +390,7 @@ class _MapScreenState extends State<MapScreen>
             _gpsLost = false;
             _gpsRetryDelaySeconds = 3;
           }
+          _lastSample = sample;
           _controller.updateUserPosition(
             sample.position,
             accuracyMeters: sample.accuracyMeters,
@@ -477,6 +482,7 @@ class _MapScreenState extends State<MapScreen>
     // en « abandonnée »).
     _finalizePendingSearch(SearchOutcome.found);
     Haptics.medium();
+    _showParkedCelebration();
     final parkedAt = DateTime.now();
     final share = saveMode == _ParkingSaveMode.shareZone;
     final sessionGeneration = ++_parkingSessionGeneration;
@@ -752,6 +758,7 @@ class _MapScreenState extends State<MapScreen>
                 const _MapLoadingCard(),
               if (state.phase != ParkingMapPhase.loading)
                 _buildResponsivePanel(state),
+              if (_celebrating) Positioned.fill(child: _celebrationOverlay()),
             ],
           );
         },
@@ -829,8 +836,23 @@ class _MapScreenState extends State<MapScreen>
         MarkerLayer(markers: _staticMarkersMemo(state, mode, colors)),
         // Le marqueur véhicule vit dans sa propre couche : c'est le seul
         // élément carte qui change à chaque échantillon GPS.
-        if (state.userPosition != null)
-          MarkerLayer(markers: [_userMarker(state.userPosition!, colors)]),
+        if (state.userPosition != null) ...[
+          // Halo de précision GPS réel (rayon en mètres).
+          if (_lastSample case final sample?)
+            CircleLayer(
+              circles: [
+                CircleMarker(
+                  point: state.userPosition!,
+                  radius: sample.accuracyMeters.clamp(5, 120),
+                  useRadiusInMeter: true,
+                  color: colors.route.withValues(alpha: 0.10),
+                  borderColor: colors.route.withValues(alpha: 0.25),
+                  borderStrokeWidth: 1,
+                ),
+              ],
+            ),
+          MarkerLayer(markers: [_userMarker(state, colors)]),
+        ],
         _MapAttribution(
           alignment: sidePanel
               ? Alignment.bottomLeft
@@ -923,22 +945,27 @@ class _MapScreenState extends State<MapScreen>
     return _memoStaticMarkers!;
   }
 
-  Marker _userMarker(LatLng position, ParkRadarColors colors) {
+  Marker _userMarker(ParkingMapState state, ParkRadarColors colors) {
+    // Cap affiché uniquement en guidage et en mouvement : cap GPS + rotation
+    // carte = angle écran.
+    double? headingScreen;
+    final sample = _lastSample;
+    if (state.phase == ParkingMapPhase.guiding &&
+        sample != null &&
+        sample.speedMetersPerSecond > 1.5 &&
+        sample.headingDegrees.isFinite &&
+        sample.headingDegrees >= 0) {
+      headingScreen = sample.headingDegrees +
+          (_mapReady ? _mapController.camera.rotation : 0);
+    }
     return Marker(
-      point: position,
-      width: 28,
-      height: 28,
+      point: state.userPosition!,
+      width: 56,
+      height: 56,
       child: Semantics(
         label: 'Votre position',
         child: ExcludeSemantics(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: colors.route,
-              shape: BoxShape.circle,
-              border: Border.all(color: colors.routeCasing, width: 4),
-              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 5)],
-            ),
-          ),
+          child: ParkUserMarker(headingScreenDegrees: headingScreen),
         ),
       ),
     );
@@ -1255,11 +1282,9 @@ class _MapScreenState extends State<MapScreen>
         minimum: const EdgeInsets.all(ParkRadarSpacing.sm),
         child: SizedBox(
           width: ParkRadarSizes.minimumTouchTarget,
-          child: Material(
-            color: colors.mapControlSurface,
-            elevation: 3,
+          child: ParkGlass(
             borderRadius: ParkRadarRadii.control,
-            clipBehavior: Clip.antiAlias,
+            enabled: state.phase != ParkingMapPhase.guiding,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1577,76 +1602,24 @@ class _MapScreenState extends State<MapScreen>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(
-                children: [
-                  ExcludeSemantics(
-                    child: Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        color: colors.brand,
-                        borderRadius: ParkRadarRadii.control,
-                      ),
-                      child: Icon(
-                        _maneuverIcon(step?.maneuver),
-                        color: colors.onBrand,
-                        size: 36,
-                      ),
-                    ),
+              AnimatedSwitcher(
+                duration: ParkRadarMotion.standard,
+                switchInCurve: ParkRadarMotion.enter,
+                switchOutCurve: ParkRadarMotion.exit,
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.35),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
                   ),
-                  const SizedBox(width: ParkRadarSpacing.sm),
-                  Expanded(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          meters == null
-                              ? 'Itinéraire en cours'
-                              : _formatDistance(meters),
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(
-                                color: colors.brand,
-                                fontWeight: FontWeight.w800,
-                              ),
-                        ),
-                        Text(
-                          step?.instruction ?? 'Suivez l’itinéraire',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        if (nextStep != null)
-                          Text(
-                            'Puis : ${nextStep.instruction}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                      ],
-                    ),
-                  ),
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        onPressed: _stopGuidance,
-                        tooltip: 'Arrêter le guidage',
-                        icon: const Icon(Icons.close),
-                      ),
-                      IconButton(
-                        onPressed: _toggleVoiceMuted,
-                        tooltip: _voiceMuted
-                            ? 'Réactiver le guidage vocal'
-                            : 'Couper le guidage vocal',
-                        icon: Icon(
-                          _voiceMuted ? Icons.volume_off : Icons.volume_up,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
+                child: KeyedSubtree(
+                  key: ValueKey(_guidanceStepIndex),
+                  child: _hudInstructionRow(step, nextStep, meters, colors),
+                ),
               ),
               if (snapshot != null) ...[
                 const SizedBox(height: ParkRadarSpacing.xs),
@@ -1667,43 +1640,178 @@ class _MapScreenState extends State<MapScreen>
                   ],
                 ),
               ],
-              if (_gpsLost) ...[
-                const SizedBox(height: ParkRadarSpacing.xs),
-                Semantics(
-                  liveRegion: true,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: ParkRadarSpacing.sm,
-                      vertical: ParkRadarSpacing.xs,
-                    ),
-                    decoration: BoxDecoration(
-                      color: colors.danger.background,
-                      borderRadius: ParkRadarRadii.control,
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.gps_off,
-                          size: 16,
-                          color: colors.danger.foreground,
+              AnimatedSize(
+                duration: ParkRadarMotion.standard,
+                curve: ParkRadarMotion.enter,
+                alignment: Alignment.topCenter,
+                child: !_gpsLost
+                    ? const SizedBox(width: double.infinity)
+                    : Padding(
+                        padding: const EdgeInsets.only(
+                          top: ParkRadarSpacing.xs,
                         ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            'Signal GPS perdu — reprise automatique en cours…',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: colors.danger.foreground),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+                        child: _gpsLostBanner(colors),
+                      ),
+              ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// Micro-célébration « place trouvée » : le moment banal devient une petite
+  /// victoire (cœur du delight Waze). Brève, non bloquante, respecte les
+  /// animations réduites.
+  void _showParkedCelebration() {
+    if (!mounted || MediaQuery.disableAnimationsOf(context)) return;
+    _celebrationTimer?.cancel();
+    setState(() => _celebrating = true);
+    _celebrationTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => _celebrating = false);
+    });
+  }
+
+  Widget _celebrationOverlay() {
+    final colors = context.parkRadarColors;
+    return IgnorePointer(
+      child: AnimatedOpacity(
+        opacity: _celebrating ? 1 : 0,
+        duration: ParkRadarMotion.standard,
+        child: Center(
+          child: AnimatedScale(
+            scale: _celebrating ? 1 : 0.4,
+            duration: ParkRadarMotion.panel,
+            curve: Curves.easeOutBack,
+            child: Container(
+              width: 112,
+              height: 112,
+              decoration: BoxDecoration(
+                color: colors.success.background,
+                shape: BoxShape.circle,
+                border: Border.all(color: colors.success.border, width: 2),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black26, blurRadius: 18),
+                ],
+              ),
+              child: Icon(
+                Icons.check_rounded,
+                size: 64,
+                color: colors.success.foreground,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _gpsLostBanner(ParkRadarColors colors) {
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+          horizontal: ParkRadarSpacing.sm,
+          vertical: ParkRadarSpacing.xs,
+        ),
+        decoration: BoxDecoration(
+          color: colors.danger.background,
+          borderRadius: ParkRadarRadii.control,
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.gps_off, size: 16, color: colors.danger.foreground),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Signal GPS perdu — reprise automatique en cours…',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: colors.danger.foreground,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _hudInstructionRow(
+    RouteStep? step,
+    RouteStep? nextStep,
+    double? meters,
+    ParkRadarColors colors,
+  ) {
+    return Row(
+      children: [
+        ExcludeSemantics(
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: colors.brand,
+              borderRadius: ParkRadarRadii.control,
+            ),
+            child: Icon(
+              _maneuverIcon(step?.maneuver),
+              color: colors.onBrand,
+              size: 36,
+            ),
+          ),
+        ),
+        const SizedBox(width: ParkRadarSpacing.sm),
+        Expanded(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                meters == null
+                    ? 'Itinéraire en cours'
+                    : _formatDistance(meters),
+                style: Theme.of(context).textTheme.titleMedium
+                    ?.copyWith(
+                      color: colors.brand,
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+              Text(
+                step?.instruction ?? 'Suivez l’itinéraire',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleLarge
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              if (nextStep != null)
+                Text(
+                  'Puis : ${nextStep.instruction}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+            ],
+          ),
+        ),
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed: _stopGuidance,
+              tooltip: 'Arrêter le guidage',
+              icon: const Icon(Icons.close),
+            ),
+            IconButton(
+              onPressed: _toggleVoiceMuted,
+              tooltip: _voiceMuted
+                  ? 'Réactiver le guidage vocal'
+                  : 'Couper le guidage vocal',
+              icon: Icon(
+                _voiceMuted ? Icons.volume_off : Icons.volume_up,
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -1756,10 +1864,10 @@ class _MapScreenState extends State<MapScreen>
         _LegendEntry('Interdit', colors.danger.foreground, _LineKind.dotted),
       ],
     };
-    return Material(
-      color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.95),
-      elevation: 2,
+    return ParkGlass(
       borderRadius: ParkRadarRadii.pill,
+      enabled: _controller.state.phase != ParkingMapPhase.guiding,
+      elevation: 2,
       child: Padding(
         padding: const EdgeInsets.symmetric(
           horizontal: ParkRadarSpacing.sm,
@@ -1783,20 +1891,40 @@ class _MapScreenState extends State<MapScreen>
   }
 
   Widget _buildResponsivePanel(ParkingMapState state) {
+    final (panelKey, panel) = switch (state.phase) {
+      _
+          when state.parkedPosition != null &&
+              state.phase != ParkingMapPhase.guiding =>
+        ('parked', _buildParkedPanel(state)),
+      ParkingMapPhase.idle => ('welcome', _buildWelcomePanel()),
+      ParkingMapPhase.failure => ('failure', _buildFailurePanel(state)),
+      _ when state.destination != null && state.loop == null => (
+        'no-loop',
+        _buildNoLoopPanel(state),
+      ),
+      _ when state.loop != null => ('loop', _buildLoopPanel(state)),
+      _ => ('welcome', _buildWelcomePanel()),
+    };
     return ParkResponsiveMapPanel(
       sideAlignment: Alignment.centerRight,
-      child: switch (state.phase) {
-        _
-            when state.parkedPosition != null &&
-                state.phase != ParkingMapPhase.guiding =>
-          _buildParkedPanel(state),
-        ParkingMapPhase.idle => _buildWelcomePanel(),
-        ParkingMapPhase.failure => _buildFailurePanel(state),
-        _ when state.destination != null && state.loop == null =>
-          _buildNoLoopPanel(state),
-        _ when state.loop != null => _buildLoopPanel(state),
-        _ => _buildWelcomePanel(),
-      },
+      // Le changement d'état glisse et fond au lieu d'apparaître d'un coup ;
+      // la clé ne change qu'entre types de panneau, pas à chaque rebuild.
+      child: AnimatedSwitcher(
+        duration: ParkRadarMotion.panel,
+        switchInCurve: ParkRadarMotion.enter,
+        switchOutCurve: ParkRadarMotion.exit,
+        transitionBuilder: (child, animation) => FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.06),
+              end: Offset.zero,
+            ).animate(animation),
+            child: child,
+          ),
+        ),
+        child: KeyedSubtree(key: ValueKey(panelKey), child: panel),
+      ),
     );
   }
 
