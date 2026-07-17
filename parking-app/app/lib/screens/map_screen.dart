@@ -14,7 +14,9 @@ import '../models/availability_estimate.dart';
 import '../models/street_segment.dart';
 import '../services/community_service.dart';
 import '../services/geocoding_service.dart';
+import '../services/haptics_service.dart';
 import '../services/location_service.dart';
+import '../services/map_camera_animator.dart';
 import '../services/overpass_service.dart';
 import '../services/paris_parking_service.dart';
 import '../services/paris_time.dart';
@@ -62,11 +64,13 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen>
+    with TickerProviderStateMixin {
   static const _parisCenter = LatLng(48.8566, 2.3522);
   static const _distance = Distance();
 
   final _mapController = MapController();
+  late final MapCameraAnimator _camera;
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
   final LayerHitNotifier<ParkingSpot> _legalHitNotifier = ValueNotifier(null);
@@ -148,6 +152,7 @@ class _MapScreenState extends State<MapScreen> {
       );
     }
 
+    _camera = MapCameraAnimator(vsync: this, controller: _mapController);
     _voiceGuidance = VoiceGuidanceService(
       engine: widget.speechEngine ?? FlutterTtsSpeechEngine(),
     );
@@ -162,6 +167,7 @@ class _MapScreenState extends State<MapScreen> {
     _controller.removeListener(_handleControllerChanged);
     _trackingGeneration++;
     _gpsRetryTimer?.cancel();
+    _camera.dispose();
     unawaited(WakelockPlus.disable());
     unawaited(_voiceGuidance.dispose());
     final positionSubscription = _positionSubscription;
@@ -195,7 +201,7 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     if (previous.destination != next.destination && next.destination != null) {
-      _afterMapReady(() => _mapController.move(next.destination!, 16));
+      _afterMapReady(() => _camera.animateTo(center: next.destination, zoom: 16));
     }
     if (!identical(previous.route, next.route) && next.route != null) {
       _syncGuidanceStep(next);
@@ -270,7 +276,7 @@ class _MapScreenState extends State<MapScreen> {
     if (!_mapReady || points.isEmpty) return;
     final size = MediaQuery.sizeOf(context);
     final sidePanel = ParkRadarBreakpoints.usesSidePanel(size);
-    _mapController.fitCamera(
+    _camera.animateFit(
       CameraFit.coordinates(
         coordinates: points,
         padding: sidePanel
@@ -299,7 +305,9 @@ class _MapScreenState extends State<MapScreen> {
         return null;
       }
       _controller.updateUserPosition(sample.position);
-      if (moveCamera && _mapReady) _mapController.move(sample.position, 17);
+      if (moveCamera && _mapReady) {
+        _camera.animateTo(center: sample.position, zoom: 17);
+      }
       return sample.position;
     }
 
@@ -326,9 +334,10 @@ class _MapScreenState extends State<MapScreen> {
     if (origin == null || !mounted) return;
     final started = await _controller.startGuidance(origin);
     if (!started || !mounted) return;
+    Haptics.medium();
     _enterGuidanceSideEffects();
     _capturePendingSearch();
-    if (_mapReady) _mapController.move(origin, 17);
+    if (_mapReady) _camera.animateTo(center: origin, zoom: 17);
     await _startPositionTracking();
   }
 
@@ -408,9 +417,20 @@ class _MapScreenState extends State<MapScreen> {
     // Le cap GPS n'est fiable qu'en mouvement : à l'arrêt on garde
     // l'orientation courante au lieu de faire tournoyer la carte.
     if (speed > 1.5 && heading.isFinite && heading >= 0 && heading <= 360) {
-      _mapController.moveAndRotate(sample.position, zoom, -heading);
+      _camera.animateTo(
+        center: sample.position,
+        zoom: zoom,
+        rotation: -heading,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOut,
+      );
     } else {
-      _mapController.move(sample.position, zoom);
+      _camera.animateTo(
+        center: sample.position,
+        zoom: zoom,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOut,
+      );
     }
   }
 
@@ -456,6 +476,7 @@ class _MapScreenState extends State<MapScreen> {
     // enregistrer avant le changement de phase (qui clôturerait la recherche
     // en « abandonnée »).
     _finalizePendingSearch(SearchOutcome.found);
+    Haptics.medium();
     final parkedAt = DateTime.now();
     final share = saveMode == _ParkingSaveMode.shareZone;
     final sessionGeneration = ++_parkingSessionGeneration;
@@ -494,6 +515,7 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _reportFreed() async {
     final position = _controller.state.parkedPosition;
     if (position == null) return;
+    Haptics.light();
     final share = _parkedSharedWithCommunity;
     _parkingSessionGeneration++;
     _parkedSharedWithCommunity = false;
@@ -691,6 +713,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     final state = _controller.state;
+    _camera.reduceMotion = MediaQuery.disableAnimationsOf(context);
     final scaffold = Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
@@ -701,6 +724,28 @@ class _MapScreenState extends State<MapScreen> {
           return Stack(
             children: [
               Positioned.fill(child: _buildMap(state, mode, sidePanel)),
+              // Scrim dégradé : assoit la lisibilité de la recherche et de la
+              // légende sur fond de tuiles claires (pattern Waze/Google Maps).
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 140,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          context.parkRadarColors.mapScrim,
+                          context.parkRadarColors.mapScrim.withValues(alpha: 0),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
               _buildMapControls(state, sidePanel),
               _buildTopOverlay(state, mode),
               if (state.phase == ParkingMapPhase.loading)
@@ -747,7 +792,9 @@ class _MapScreenState extends State<MapScreen> {
       ),
       children: [
         TileLayer(
-          urlTemplate: AppConfig.mapTileUrlTemplate,
+          urlTemplate: Theme.of(context).brightness == Brightness.dark
+              ? AppConfig.mapTileUrlTemplateDark
+              : AppConfig.mapTileUrlTemplate,
           userAgentPackageName: 'fr.zakariatabout.parking_app',
           maxNativeZoom: 19,
           evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
@@ -1263,10 +1310,11 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   IconButton(
                     onPressed: () {
+                      Haptics.selection();
                       setState(() => _cameraFollowing = true);
                       final position = state.userPosition;
                       if (position != null && _mapReady) {
-                        _mapController.move(position, 17);
+                        _camera.animateTo(center: position, zoom: 17);
                       }
                     },
                     tooltip: 'Recentrer sur ma position',
@@ -1334,7 +1382,7 @@ class _MapScreenState extends State<MapScreen> {
     final state = _controller.state;
     final parked = state.parkedPosition;
     if (parked == null) return;
-    if (_mapReady) _mapController.move(parked, 17);
+    if (_mapReady) _camera.animateTo(center: parked, zoom: 17);
     final user = state.userPosition;
     if (user == null) {
       _showSnack(
@@ -1660,6 +1708,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _toggleVoiceMuted() {
+    Haptics.selection();
     setState(() {
       _voiceMuted = !_voiceMuted;
       _voiceGuidance.muted = _voiceMuted;

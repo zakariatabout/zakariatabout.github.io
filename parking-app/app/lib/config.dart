@@ -54,6 +54,15 @@ class AppConfig {
     'MAP_TILE_URL_TEMPLATE',
     defaultValue: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   );
+
+  /// Template dédié au thème sombre (ex. Stadia Alidade Smooth Dark, en paire
+  /// avec le clair). Vide = on réutilise le template clair.
+  static const String _mapTileUrlTemplateDark = String.fromEnvironment(
+    'MAP_TILE_URL_TEMPLATE_DARK',
+  );
+  static String get mapTileUrlTemplateDark => _mapTileUrlTemplateDark.isEmpty
+      ? mapTileUrlTemplate
+      : _mapTileUrlTemplateDark;
   static const String mapTileAttribution = String.fromEnvironment(
     'MAP_TILE_ATTRIBUTION',
     defaultValue: '© contributeurs OpenStreetMap',
