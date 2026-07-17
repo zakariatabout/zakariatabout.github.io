@@ -145,10 +145,17 @@ class _ParkSearchShellState extends State<ParkSearchShell> {
               boxShadow: [
                 BoxShadow(
                   color: dark
+                      ? ParkRadarSearchPalette.shadowKeyDark
+                      : ParkRadarSearchPalette.shadowKeyLight,
+                  blurRadius: 3,
+                  offset: const Offset(0, 1),
+                ),
+                BoxShadow(
+                  color: dark
                       ? ParkRadarSearchPalette.shadowDark
                       : ParkRadarSearchPalette.shadowLight,
-                  blurRadius: _focused ? 28 : 18,
-                  offset: Offset(0, _focused ? 10 : 6),
+                  blurRadius: _focused ? 24 : 14,
+                  offset: Offset(0, _focused ? 8 : 5),
                 ),
               ],
             ),

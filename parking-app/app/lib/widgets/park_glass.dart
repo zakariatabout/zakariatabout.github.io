@@ -41,7 +41,7 @@ class ParkGlass extends StatelessWidget {
     return Material(
       color: colors.mapControlSurface.withValues(alpha: 0.94),
       elevation: elevation,
-      shadowColor: Colors.black38,
+      shadowColor: Colors.black26,
       borderRadius: borderRadius,
       clipBehavior: Clip.antiAlias,
       child: DecoratedBox(

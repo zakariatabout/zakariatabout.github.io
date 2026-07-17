@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -187,6 +188,54 @@ void main() {
           )
           .height,
       greaterThanOrEqualTo(ParkRadarSizes.minimumTouchTarget),
+    );
+  });
+
+  testWidgets('anti-voile : l’attribution reste une pilule et le centre de '
+      'la carte reste atteignable', (tester) async {
+    final controller = _controller();
+    addTearDown(controller.dispose);
+    await _pumpMap(
+      tester,
+      controller: controller,
+      store: _FakeSessionStore(null),
+    );
+
+    // 1. La surface tactile de l'attribution reste shrink-wrappée. Le bug
+    // « voile » (Align interne sans widthFactor/heightFactor) l'étirait sur
+    // toute la largeur/hauteur disponible.
+    final attributionSurface = tester.getSize(
+      find
+          .ancestor(
+            of: find.textContaining('OpenStreetMap'),
+            matching: find.byType(InkWell),
+          )
+          .first,
+    );
+    expect(attributionSurface.width, lessThanOrEqualTo(380));
+    expect(
+      attributionSurface.height,
+      lessThan(80),
+      reason:
+          'Attribution étirée : régression « voile » (widthFactor perdu '
+          'sur l’Align interne de _AttributionPill).',
+    );
+
+    // 2. Le hit-test au centre de la carte doit atteindre FlutterMap :
+    // aucun overlay ne doit absorber les gestes.
+    final result = HitTestResult();
+    tester.binding.hitTestInView(
+      result,
+      tester.getCenter(find.byType(FlutterMap)),
+      tester.view.viewId,
+    );
+    final mapRender = tester.renderObject(find.byType(FlutterMap));
+    expect(
+      result.path.any((entry) => entry.target == mapRender),
+      isTrue,
+      reason:
+          'Un widget posé au-dessus de la carte capte le hit-test au '
+          'centre : voile de hit-test.',
     );
   });
 

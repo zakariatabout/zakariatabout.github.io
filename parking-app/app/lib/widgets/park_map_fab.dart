@@ -48,8 +48,8 @@ class ParkMapFab extends StatelessWidget {
                     .withValues(alpha: 0.4),
               ),
             ),
-      elevation: active ? 6 : 4,
-      shadowColor: Colors.black45,
+      elevation: active ? 6 : 3,
+      shadowColor: Colors.black38,
       clipBehavior: Clip.antiAlias,
       child: IconButton(
         onPressed: onPressed,

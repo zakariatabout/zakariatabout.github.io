@@ -727,6 +727,21 @@ class _MapScreenState extends State<MapScreen>
             constraints.biggest,
           );
           final mode = _layerMode(state);
+          // INVARIANT ANTI-« VOILE » — tout enfant non positionné de ce
+          // Stack reçoit des contraintes lâches mais bornées : un Align /
+          // Center / Container(alignment:) NON facturé s'y étire plein
+          // écran. C'est voulu pour positionner (contrôles, overlay haut,
+          // panneau, chargement) et sans danger tant que le widget étiré ne
+          // porte AUCUNE couleur, décoration ni Semantics bloquant :
+          //  - le fond vit sur un descendant shrink-wrappé (Align
+          //    widthFactor/heightFactor: 1 — cf. _AttributionPill —, taille
+          //    fixe, ou Column/Wrap en mainAxisSize.min) ;
+          //  - les couches purement visuelles plein écran passent sous
+          //    IgnorePointer (scrim, célébration, chargement).
+          // Ne JAMAIS « corriger » en facturant les Align de positionnement
+          // (_buildMapControls, ParkMapOverlayShell, ParkResponsiveMapPanel) :
+          // le Stack les enverrait en haut-gauche. Régression couverte par le
+          // test « anti-voile » de map_screen_test.dart.
           return Stack(
             children: [
               Positioned.fill(child: _buildMap(state, mode, sidePanel)),
@@ -743,12 +758,19 @@ class _MapScreenState extends State<MapScreen>
                       gradient: LinearGradient(
                         begin: Alignment.topCenter,
                         end: Alignment.bottomCenter,
-                        // Dégradé accordé à la basemap filtrée (le token
-                        // mapScrim reste réservé aux barriers de modales).
+                        // Fonds CARTO natifs. Même condition que _buildMap :
+                        // le guidage force Dark Matter même en thème clair.
+                        // Sombre : noir pur (Dark Matter est achromatique).
+                        // Clair : voile BLANC, pattern carte claire
+                        // Apple/Google — il assoit aussi les icônes sombres
+                        // de la status bar. (Le token mapScrim reste réservé
+                        // aux barriers de modales.)
                         colors:
-                            Theme.of(context).brightness == Brightness.dark
-                            ? const [Color(0xD90F172A), Color(0x000F172A)]
-                            : const [Color(0x59000000), Color(0x00000000)],
+                            (state.phase == ParkingMapPhase.guiding ||
+                                Theme.of(context).brightness ==
+                                    Brightness.dark)
+                            ? const [Color(0xD9000000), Color(0x00000000)]
+                            : const [Color(0xBFFFFFFF), Color(0x00FFFFFF)],
                       ),
                     ),
                   ),
@@ -853,12 +875,13 @@ class _MapScreenState extends State<MapScreen>
         // couleur assortie au fond réel des tuiles pour éviter tout flash.
         backgroundColor: isDark
             ? (hasNativeDarkTiles
-                  // Fond de plan CARTO Dark Matter (~noir neutre).
-                  ? const Color(0xFF0E1214)
+                  // Fond CARTO Dark Matter RASTER (dark_all) : @landmass_fill
+                  // #090909 du CartoCSS dark-matter.tm2 — achromatique.
+                  ? const Color(0xFF090909)
                   : ParkRadarMapFilters.darkBackdrop)
             : (osmStandardLight
                   ? ParkRadarMapFilters.lightBackdrop
-                  // Fond de plan CARTO Positron (blanc cassé).
+                  // Fond CARTO Positron (@landmass_fill #fafaf8).
                   : const Color(0xFFFAFAF8)),
         onMapReady: _onMapReady,
         onTap: (_, _) {
@@ -955,16 +978,22 @@ class _MapScreenState extends State<MapScreen>
             ),
           MarkerLayer(markers: [_userMarker(state, colors)]),
         ],
-        _MapAttribution(
-          alignment: sidePanel
-              ? Alignment.bottomLeft
-              : const Alignment(-1, -0.25),
-          label: '${AppConfig.mapTileAttribution} · Ville de Paris',
-          onTap: _openMapAttribution,
-        ),
+        // Téléphone : l'attribution vit au-dessus de la feuille basse
+        // (aboveSheet). Ici : panneau latéral uniquement, plus un repli en
+        // bas à gauche pendant le chargement (pas encore de feuille, mais
+        // l'obligation OSM/CARTO demeure).
+        if (sidePanel || state.phase == ParkingMapPhase.loading)
+          _MapAttribution(
+            alignment: Alignment.bottomLeft,
+            label: _attributionLabel,
+            onTap: _openMapAttribution,
+          ),
       ],
     );
   }
+
+  String get _attributionLabel =>
+      '${AppConfig.mapTileAttribution} · Ville de Paris';
 
   // ── Mémoïsation des couches carte ────────────────────────────────────────
   // L'état du contrôleur est immuable : une comparaison d'identité suffit à
@@ -1097,8 +1126,7 @@ class _MapScreenState extends State<MapScreen>
     };
     return [
       for (final scored in state.scoredSegments)
-        if (state.eligibility[scored.segment.id]?.canRecommend == true &&
-            scored.probabilityFree > 0.01 &&
+        if (_isDrawnAvailability(state, scored) &&
             (!loopOnly || loopIds.contains(scored.segment.id)))
           _availabilityPolyline(
             scored,
@@ -1327,7 +1355,7 @@ class _MapScreenState extends State<MapScreen>
                 decoration: BoxDecoration(
                   color: const Color(0xFF2563EB),
                   shape: BoxShape.circle,
-                  border: Border.all(color: const Color(0xFFFAF7F2), width: 3),
+                  border: Border.all(color: const Color(0xFFFFFFFF), width: 3),
                   boxShadow: const [
                     BoxShadow(
                       color: Color(0x59000000),
@@ -1388,7 +1416,7 @@ class _MapScreenState extends State<MapScreen>
                     child: Text(
                       '${index + 1}',
                       style: TextStyle(
-                        color: const Color(0xFF0B1220),
+                        color: const Color(0xFF0D0E0F),
                         fontSize: index == 0 ? 15 : 13,
                         fontWeight: FontWeight.w800,
                         height: 1,
@@ -1468,15 +1496,16 @@ class _MapScreenState extends State<MapScreen>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            ParkMapFab(
-              icon: const Icon(Icons.my_location),
-              tooltip: 'Afficher ma position',
-              opaque: guiding,
-              onPressed: () =>
-                  unawaited(_requestCurrentLocation(moveCamera: true)),
-            ),
-            if (guiding && !_cameraFollowing) ...[
-              const SizedBox(height: ParkRadarSpacing.sm),
+            // Conduite façon Waze : zéro FAB tant que la caméra suit ; seul
+            // « Recentrer » apparaît après un pan manuel.
+            if (!guiding)
+              ParkMapFab(
+                icon: const Icon(Icons.my_location),
+                tooltip: 'Afficher ma position',
+                onPressed: () =>
+                    unawaited(_requestCurrentLocation(moveCamera: true)),
+              ),
+            if (guiding && !_cameraFollowing)
               ParkMapFab(
                 icon: const Icon(Icons.navigation),
                 tooltip: 'Recentrer sur ma position',
@@ -1491,7 +1520,6 @@ class _MapScreenState extends State<MapScreen>
                   }
                 },
               ),
-            ],
             if (showLegalToggle) ...[
               const SizedBox(height: ParkRadarSpacing.sm),
               Semantics(
@@ -1516,7 +1544,7 @@ class _MapScreenState extends State<MapScreen>
                 ),
               ),
             ],
-            if (state.parkedPosition != null) ...[
+            if (state.parkedPosition != null && !guiding) ...[
               const SizedBox(height: ParkRadarSpacing.sm),
               ParkMapFab(
                 icon: const Icon(Icons.directions_car),
@@ -1590,10 +1618,7 @@ class _MapScreenState extends State<MapScreen>
               onDismiss: () => setState(() => _tileUnavailable = false),
             ),
           ],
-          if (!_tileUnavailable &&
-              (state.notice == null || mode == _MapLayerMode.legal) &&
-              state.suggestions.isEmpty &&
-              state.scoredSegments.isNotEmpty) ...[
+          if (_legendVisible(state, mode)) ...[
             const SizedBox(height: ParkRadarSpacing.xs),
             Align(alignment: Alignment.center, child: _buildLegend(mode)),
           ],
@@ -2110,7 +2135,6 @@ class _MapScreenState extends State<MapScreen>
     };
     return ParkGlass(
       borderRadius: ParkRadarRadii.pill,
-      enabled: _controller.state.phase != ParkingMapPhase.guiding,
       elevation: 2,
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -2162,6 +2186,11 @@ class _MapScreenState extends State<MapScreen>
     };
     return ParkResponsiveMapPanel(
       sideAlignment: Alignment.centerRight,
+      // Attribution discrète mais toujours accessible, au ras de la feuille.
+      aboveSheet: _AttributionPill(
+        label: _attributionLabel,
+        onTap: _openMapAttribution,
+      ),
       // Le changement d'état glisse et fond au lieu d'apparaître d'un coup ;
       // la clé ne change qu'entre types de panneau, pas à chaque rebuild.
       child: AnimatedSwitcher(
@@ -2355,7 +2384,76 @@ class _MapScreenState extends State<MapScreen>
     );
   }
 
+  /// Feuille de conduite minimale, façon Waze : le HUD porte déjà
+  /// l'instruction, l'ETA et l'arrêt (croix « Arrêter le guidage ») ; la
+  /// feuille se réduit à la cible et à l'action reine. La durée de boucle
+  /// couvre le trou avant le premier snapshot GPS du HUD.
+  Widget _buildGuidingSheet(ParkingMapState state) {
+    final loop = state.loop!;
+    final ranked = [...loop.orderedSegments]
+      ..sort((a, b) => b.probabilityFree.compareTo(a.probabilityFree));
+    final best = ranked.first;
+    final minutes = state.route == null
+        ? null
+        : (state.route!.durationSeconds / 60).ceil().clamp(1, 999);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          minutes == null
+              ? 'Visez ${best.segment.name}'
+              : 'Visez ${best.segment.name} · $minutes min',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          // Thème conduite forcé sombre (ParkRadarTheme.dark) : token HUD
+          // lisible sur la feuille (~5,2:1).
+          style: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            color: ParkRadarHud.muted,
+          ),
+        ),
+        const SizedBox(height: ParkRadarSpacing.xs),
+        FilledButton.icon(
+          onPressed: state.reporting ? null : _reportParked,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF22C55E),
+            foregroundColor: const Color(0xFF052E16),
+            disabledBackgroundColor: const Color(0xFF14532D),
+            disabledForegroundColor: const Color(0xFF86EFAC),
+            minimumSize: const Size.fromHeight(ParkRadarSizes.hudActionHeight),
+            shape: const RoundedRectangleBorder(
+              borderRadius: ParkRadarRadii.card,
+            ),
+            textStyle: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.2,
+            ),
+            elevation: 4,
+            shadowColor: const Color(0x8022C55E),
+          ),
+          icon: state.reporting
+              ? const SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: Color(0xFF86EFAC),
+                  ),
+                )
+              : const Icon(Icons.local_parking, size: 26),
+          label: const Text('Place trouvée'),
+        ),
+      ],
+    );
+  }
+
   Widget _buildLoopPanel(ParkingMapState state) {
+    if (state.phase == ParkingMapPhase.guiding) {
+      return _buildGuidingSheet(state);
+    }
     final loop = state.loop!;
     final ranked = [...loop.orderedSegments]
       ..sort((a, b) => b.probabilityFree.compareTo(a.probabilityFree));
@@ -2368,7 +2466,6 @@ class _MapScreenState extends State<MapScreen>
         ? '${loop.orderedSegments.length} zones à parcourir'
         : 'boucle routée d’environ $routeMinutes min';
     final difficulty = loop.difficulty;
-    final guiding = state.phase == ParkingMapPhase.guiding;
     final preview = state.phase == ParkingMapPhase.preview;
     final canRoute = state.canStartGuidance;
 
@@ -2384,9 +2481,7 @@ class _MapScreenState extends State<MapScreen>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    guiding
-                        ? 'Recherche guidée en cours'
-                        : '${difficulty.label} · ${difficulty.expectedTimeLabel}',
+                    '${difficulty.label} · ${difficulty.expectedTimeLabel}',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: ParkRadarSpacing.xxs),
@@ -2399,95 +2494,39 @@ class _MapScreenState extends State<MapScreen>
                 ],
               ),
             ),
-            if (!guiding)
-              IconButton(
-                onPressed: _pickArrivalHour,
-                tooltip: 'Changer l’heure d’arrivée',
-                icon: const Icon(Icons.schedule),
-              ),
+            IconButton(
+              onPressed: _pickArrivalHour,
+              tooltip: 'Changer l’heure d’arrivée',
+              icon: const Icon(Icons.schedule),
+            ),
           ],
         ),
-        // En conduite, le panneau se réduit à l'essentiel : le HUD porte
-        // déjà l'instruction et l'ETA, on ne garde que l'action reine.
-        if (!guiding) ...[
-          const SizedBox(height: ParkRadarSpacing.sm),
-          Wrap(
-            spacing: ParkRadarSpacing.xs,
-            runSpacing: ParkRadarSpacing.xs,
-            children: [
-              _predictionConfidenceChip(state),
-              _predictionFreshnessChip(state),
-            ],
-          ),
+        const SizedBox(height: ParkRadarSpacing.sm),
+        Wrap(
+          spacing: ParkRadarSpacing.xs,
+          runSpacing: ParkRadarSpacing.xs,
+          children: [
+            _predictionConfidenceChip(state),
+            _predictionFreshnessChip(state),
+          ],
+        ),
+        if (_communityNoteworthy(state)) ...[
           const SizedBox(height: ParkRadarSpacing.xs),
-          Text(
-            _predictionAuditLabel(state),
-            style: Theme.of(context).textTheme.labelSmall,
-          ),
           Text(
             _communityFreshnessLabel(state),
             style: Theme.of(context).textTheme.labelSmall,
           ),
-          const SizedBox(height: ParkRadarSpacing.sm),
-          _legalSummary(state),
-          const SizedBox(height: ParkRadarSpacing.sm),
-          _arrivalControl(state),
         ],
-        if (route != null && !guiding) ...[
+        const SizedBox(height: ParkRadarSpacing.sm),
+        _legalSummary(state, compact: true),
+        const SizedBox(height: ParkRadarSpacing.sm),
+        _arrivalControl(state),
+        if (route != null) ...[
           const SizedBox(height: ParkRadarSpacing.sm),
-          _routeSummary(route, preview: preview, guiding: guiding),
+          _routeSummary(route, preview: preview, guiding: false),
         ],
         const SizedBox(height: ParkRadarSpacing.md),
-        if (guiding) ...[
-          FilledButton.icon(
-            onPressed: state.reporting ? null : _reportParked,
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF22C55E),
-              foregroundColor: const Color(0xFF052E16),
-              disabledBackgroundColor: const Color(0xFF14532D),
-              disabledForegroundColor: const Color(0xFF86EFAC),
-              minimumSize: const Size.fromHeight(
-                ParkRadarSizes.hudActionHeight,
-              ),
-              shape: const RoundedRectangleBorder(
-                borderRadius: ParkRadarRadii.card,
-              ),
-              textStyle: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.2,
-              ),
-              elevation: 4,
-              shadowColor: const Color(0x8022C55E),
-            ),
-            icon: state.reporting
-                ? const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Color(0xFF86EFAC),
-                    ),
-                  )
-                : const Icon(Icons.local_parking, size: 26),
-            label: const Text('Place trouvée'),
-          ),
-          const SizedBox(height: ParkRadarSpacing.xs),
-          TextButton.icon(
-            onPressed: _stopGuidance,
-            style: TextButton.styleFrom(
-              foregroundColor: context.parkRadarColors.danger.foreground,
-              minimumSize: const Size.fromHeight(
-                ParkRadarSizes.minimumTouchTarget,
-              ),
-              textStyle: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            icon: const Icon(Icons.stop_circle_outlined, size: 20),
-            label: const Text('Arrêter le guidage'),
-          ),
-        ] else if (preview) ...[
+        if (preview) ...[
           FilledButton.icon(
             onPressed: canRoute && !state.routing ? _startGuidance : null,
             icon: state.routing
@@ -2519,7 +2558,7 @@ class _MapScreenState extends State<MapScreen>
                 : const Icon(Icons.alt_route),
             label: const Text('Prévisualiser la boucle'),
           ),
-        if (!state.hasVerifiedLegalCoverage && !guiding) ...[
+        if (!state.hasVerifiedLegalCoverage) ...[
           const SizedBox(height: ParkRadarSpacing.xs),
           Text(
             'Guidage désactivé tant que l’inventaire des régimes n’est pas disponible.',
@@ -2578,12 +2617,11 @@ class _MapScreenState extends State<MapScreen>
     return ParkFreshnessChip(level: level, detail: detail);
   }
 
-  String _predictionAuditLabel(ParkingMapState state) {
-    final versions = state.predictionVersions;
-    if (versions == null) return 'Prédiction non disponible et non versionnée.';
-    return 'Modèle ${versions.model} · données ${versions.data} · '
-        'calibration ${versions.calibration}';
-  }
+  /// La ligne communauté n'est affichée que quand elle change la lecture :
+  /// signal ignoré (mise à jour échouée) ou arrivée future (non appliquée).
+  /// Le cas nominal est déjà porté par le chip de fraîcheur.
+  bool _communityNoteworthy(ParkingMapState state) =>
+      !state.isNow || state.communityStatus == DataLayerStatus.stale;
 
   String _communityFreshnessLabel(ParkingMapState state) {
     if (!state.isNow) {
@@ -2601,7 +2639,7 @@ class _MapScreenState extends State<MapScreen>
     };
   }
 
-  Widget _legalSummary(ParkingMapState state) {
+  Widget _legalSummary(ParkingMapState state, {bool compact = false}) {
     final colors = context.parkRadarColors;
     final available = state.hasVerifiedLegalCoverage;
     final stale = available && state.legalStatus == DataLayerStatus.stale;
@@ -2628,7 +2666,7 @@ class _MapScreenState extends State<MapScreen>
         : 'Inventaire Paris chargé · $eligible zone${eligible > 1 ? 's' : ''} '
               'jugée${eligible > 1 ? 's' : ''} compatible${eligible > 1 ? 's' : ''}'
               '${age == null ? '' : ' · source ${_formatDataAge(age)}'}'
-              '${regimeText.isEmpty ? '' : '\nRégimes présents : $regimeText'}';
+              '${compact || regimeText.isEmpty ? '' : '\nRégimes présents : $regimeText'}';
     return Semantics(
       label: !available
           ? 'Inventaire des régimes Paris indisponible'
@@ -2732,6 +2770,35 @@ class _MapScreenState extends State<MapScreen>
     }
     if (state.showLegalLayer) return _MapLayerMode.legal;
     return _MapLayerMode.availability;
+  }
+
+  /// Un tronçon de disponibilité n'est dessiné que s'il est recommandable et
+  /// porte un signal. Même prédicat pour la couche ET pour la légende.
+  static bool _isDrawnAvailability(
+    ParkingMapState state,
+    ScoredSegment scored,
+  ) =>
+      state.eligibility[scored.segment.id]?.canRecommend == true &&
+      scored.probabilityFree > 0.01;
+
+  /// La légende n'apparaît que quand elle décode réellement l'écran :
+  /// - réglementation : dès qu'il existe des tronçons officiels (la couche
+  ///   dessinée lit parisSpots, pas scoredSegments) ;
+  /// - disponibilité : seulement si au moins un trait est dessiné ;
+  /// - aperçu/guidage (mode route) : jamais — choix produit façon Waze,
+  ///   pastilles numérotées, triple trait et feuille basse portent déjà
+  ///   l'information.
+  bool _legendVisible(ParkingMapState state, _MapLayerMode mode) {
+    if (_tileUnavailable || state.suggestions.isNotEmpty) return false;
+    return switch (mode) {
+      _MapLayerMode.legal => state.parisSpots.isNotEmpty,
+      _MapLayerMode.availability =>
+        state.notice == null &&
+            state.scoredSegments.any(
+              (scored) => _isDrawnAvailability(state, scored),
+            ),
+      _MapLayerMode.route => false,
+    };
   }
 
   _AvailabilityLevel _availabilityLevel(double value) {
@@ -2853,25 +2920,31 @@ class _MapLoadingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Semantics(
-        container: true,
-        liveRegion: true,
-        label: 'Analyse des rues et de l’inventaire des régimes en cours',
-        child: ExcludeSemantics(
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(ParkRadarSpacing.lg),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: ParkRadarSpacing.sm),
-                  Text(
-                    'Analyse des rues et des régimes…',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ],
+    // Plein écran via Center (enfant non positionné du Stack) mais
+    // strictement informatif : IgnorePointer garantit que ni le Center
+    // étiré ni la Card ne volent les gestes de la carte pendant le
+    // chargement (famille « voile », variante hit-test).
+    return IgnorePointer(
+      child: Center(
+        child: Semantics(
+          container: true,
+          liveRegion: true,
+          label: 'Analyse des rues et de l’inventaire des régimes en cours',
+          child: ExcludeSemantics(
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(ParkRadarSpacing.lg),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: ParkRadarSpacing.sm),
+                    Text(
+                      'Analyse des rues et des régimes…',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -2897,40 +2970,63 @@ class _MapAttribution extends StatelessWidget {
     return SafeArea(
       child: Align(
         alignment: alignment,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 320),
-          child: Material(
-            color: Theme.of(
-              context,
-            ).colorScheme.surface.withValues(alpha: 0.92),
-            borderRadius: ParkRadarRadii.control,
-            clipBehavior: Clip.antiAlias,
-            child: Semantics(
-              button: true,
-              label: 'Informations et licences cartographiques',
-              child: InkWell(
-                onTap: onTap,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minHeight: ParkRadarSizes.minimumTouchTarget,
+        child: Padding(
+          padding: const EdgeInsets.all(ParkRadarSpacing.xs),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 320),
+            child: _AttributionPill(label: label, onTap: onTap),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pilule d'attribution : cible tactile de 48 pt garantie (obligation
+/// OSM/CARTO), visuel réduit à une petite étiquette translucide. L'InkWell
+/// déborde en zone transparente au-dessus de l'étiquette.
+class _AttributionPill extends StatelessWidget {
+  const _AttributionPill({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      type: MaterialType.transparency,
+      child: Semantics(
+        button: true,
+        label: 'Informations et licences cartographiques',
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: ParkRadarRadii.pill,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minHeight: ParkRadarSizes.minimumTouchTarget,
+            ),
+            // widthFactor OBLIGATOIRE : sans lui la pilule s'étirerait sur
+            // toute la largeur disponible (leçon du « voile » corrigé).
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              widthFactor: 1,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surface.withValues(alpha: 0.88),
+                  borderRadius: ParkRadarRadii.pill,
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: ParkRadarSpacing.xs,
+                    vertical: 3,
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: ParkRadarSpacing.xs,
-                      vertical: ParkRadarSpacing.xxs,
-                    ),
-                    // widthFactor/heightFactor OBLIGATOIRES : sans eux, cet
-                    // Align s'étire au maximum disponible et le fond sombre du
-                    // bouton recouvrait 320 pt x toute la hauteur de la carte
-                    // (le « voile » constaté sur iPhone).
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      widthFactor: 1,
-                      heightFactor: 1,
-                      child: Text(
-                        label,
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
+                  child: Text(
+                    label,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      fontSize: 10,
+                      height: 1.2,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ),

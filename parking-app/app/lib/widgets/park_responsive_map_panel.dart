@@ -16,11 +16,16 @@ class ParkResponsiveMapPanel extends StatelessWidget {
     required this.child,
     this.scrollController,
     this.sideAlignment = Alignment.centerLeft,
+    this.aboveSheet,
   });
 
   final Widget child;
   final ScrollController? scrollController;
   final Alignment sideAlignment;
+
+  /// Élément flottant rendu au-dessus de la feuille basse, aligné à gauche
+  /// (ex. attribution cartographique). Ignoré en présentation latérale.
+  final Widget? aboveSheet;
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +71,19 @@ class ParkResponsiveMapPanel extends StatelessWidget {
                 maxWidth: 640,
                 maxHeight: size.height * 0.58,
               ),
-              child: panel,
+              child: aboveSheet == null
+                  ? panel
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: aboveSheet,
+                        ),
+                        const SizedBox(height: ParkRadarSpacing.xxs),
+                        Flexible(child: panel),
+                      ],
+                    ),
             ),
           ),
         );
@@ -116,12 +133,12 @@ class ParkMapPanelSurface extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.50 : 0.16),
-            blurRadius: 28,
+            color: Colors.black.withValues(alpha: isDark ? 0.50 : 0.10),
+            blurRadius: isDark ? 28 : 22,
             offset: const Offset(0, 10),
           ),
           BoxShadow(
-            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.08),
+            color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.05),
             blurRadius: 4,
             offset: const Offset(0, 2),
           ),

@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
 /// Pin de destination « goutte » signature de ParkRadar : bleu marque + liseré
-/// crème, identique dans les deux thèmes. La pointe touche le point
+/// blanc, identique dans les deux thèmes. La pointe touche le point
 /// géographique : utiliser `alignment: Alignment.topCenter` dans le Marker.
 /// MaskFilter.blur est autorisé (ce n'est PAS un BackdropFilter).
 class ParkDestinationPin extends StatelessWidget {
   const ParkDestinationPin({
     super.key,
     this.fill = const Color(0xFF2563EB),
-    this.ring = const Color(0xFFFAF7F2),
+    this.ring = const Color(0xFFFFFFFF),
   });
 
   final Color fill;

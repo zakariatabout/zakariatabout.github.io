@@ -123,7 +123,7 @@ class ParkRadarColors extends ThemeExtension<ParkRadarColors> {
     routeCasing: Color(0xFF0B1220),
     routeInner: Color(0xFFA7C8FF),
     routeGlow: Color(0x383B82F6),
-    mapCasing: Color(0xE60B1220),
+    mapCasing: Color(0xE60D0E0F),
     availabilityHigh: Color(0xFF4ADE80),
     availabilityMedium: Color(0xFFFBBF24),
     availabilityLow: Color(0xFFF97066),
@@ -188,9 +188,11 @@ class ParkRadarColors extends ThemeExtension<ParkRadarColors> {
   /// Halo translucide sous l'itinéraire (alpha ~20 %).
   final Color routeGlow;
 
-  /// Casing unifié de toutes les couches carte (traits de disponibilité,
-  /// boucle, itinéraire) : même bleu-nuit que le fond des tuiles assombries,
-  /// pour que les couches paraissent appartenir au même monde.
+  /// Casing unifié des couches carte (traits de disponibilité, traits légaux,
+  /// pastilles d'étapes) : blanc sur Positron, graphite neutre calé sur le
+  /// land Dark Matter (~#090909) en sombre — plus sombre que ses rues, les
+  /// traits se détachent sans dominante bleue. L'itinéraire, lui, garde
+  /// [routeCasing] (bleu-nuit assorti au trait bleu).
   final Color mapCasing;
 
   /// Traits de disponibilité posés sur les tuiles (saturés et lumineux en
@@ -416,10 +418,14 @@ abstract final class ParkRadarSearchPalette {
   static const Color surfaceDark = Color(0xFF1A2230);
   static const Color hintLight = Color(0xFF667085); // 5,0:1 sur surfaceLight
   static const Color hintDark = Color(0xFF98A2B3); // 6,2:1 sur surfaceDark
-  static const Color hairlineLight = Color(0xFFE4E7EC);
+  // == neutral.border : visible sur les rues blanches de Positron.
+  static const Color hairlineLight = Color(0xFFD0D5DD);
   static const Color hairlineDark = Color(0xFF2E3A4E);
-  static const Color shadowLight = Color(0x29101828);
+  static const Color shadowLight = Color(0x1F101828); // ambiante allégée
   static const Color shadowDark = Color(0x66000000);
+  // Ombre-clé serrée : elle définit le bord de la surface.
+  static const Color shadowKeyLight = Color(0x24101828);
+  static const Color shadowKeyDark = Color(0x40000000);
 }
 
 /// Filtres couleur appliqués aux tuiles raster OSM (tile.openstreetmap.org)
